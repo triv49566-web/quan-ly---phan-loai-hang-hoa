@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Môi trường ảo
+.venv/
+venv/
+env/
+
+# Cơ sở dữ liệu cục bộ (tự tạo lại từ data/raw/*.csv)
+data/hanghoa.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDE / OS
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Log / tạm
+*.log
+server.log
