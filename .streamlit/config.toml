@@ -1,9 +1,24 @@
+# Giao diện "Sổ Kho" – theo bản thiết kế lại (xanh lá đậm, nền xám nhạt, chữ Be Vietnam Pro)
 [theme]
-primaryColor = "#16a34a"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f1f5f9"
-textColor = "#0f172a"
-font = "sans serif"
+base = "light"
+primaryColor = "#14532D"
+backgroundColor = "#F3F5F4"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#12211C"
+linkColor = "#14532D"
+borderColor = "#DCE3DF"
+showWidgetBorder = true
+baseRadius = "8px"
+font = "'Be Vietnam Pro':https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap, sans-serif"
+headingFontWeights = [700, 700, 600, 600, 600, 600]
+
+[theme.sidebar]
+backgroundColor = "#0F2E24"
+secondaryBackgroundColor = "#1A3D31"
+textColor = "#FFFFFF"
+primaryColor = "#FFFFFF"
+linkColor = "#FFFFFF"
+borderColor = "#2A4A3F"
 
 [server]
 headless = true

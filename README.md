@@ -93,20 +93,19 @@ Mọi thao tác thêm / sửa / nhập / xuất sau đó được lưu vào file
 
 ## 3. Hướng dẫn sử dụng giao diện
 
-**Thanh bên (sidebar):**
-- *Danh mục* — chọn một hoặc nhiều danh mục để lọc.
-- *Tìm theo tên* — gõ một phần tên sản phẩm.
-- *Trạng thái tồn kho* — chỉ xem hàng 🟢 Đủ / 🟠 Sắp hết / 🔴 Hết.
+Giao diện **“Sổ Kho”**: thanh điều hướng xanh đậm bên trái, nền xám nhạt, các
+khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm trong
+`.streamlit/config.toml`, phần trang trí thêm nằm ở biến `CSS` trong `app.py`.
 
-**5 tab chính:**
+**5 trang (chọn ở thanh bên):**
 
-| Tab | Công dụng |
-|-----|-----------|
-| 📦 **Tồn kho** | Bảng tồn kho chia theo danh mục: số lượng, giá trị, lượng xuất 30 ngày, số ngày còn đủ dùng; tải CSV |
-| 🔄 **Nhập / Xuất kho** | Ghi phiếu nhập hoặc xuất (không cho xuất quá tồn kho); xem 15 giao dịch gần nhất |
-| 🗂️ **Sản phẩm & Danh mục** | Thêm / sửa / xóa sản phẩm; thêm / xóa danh mục |
-| 📈 **Báo cáo** | Giá trị tồn theo danh mục, trạng thái theo danh mục, nhập/xuất theo tháng, top hàng bán chạy |
-| 🗃️ **Lịch sử giao dịch** | Lọc theo loại & khoảng ngày; tải CSV |
+| Trang | Công dụng |
+|-------|-----------|
+| **Tồn kho** | 4 ô tổng quan, khối *Cần nhập hàng*, bảng tồn kho có thanh so với mức tối thiểu; tìm theo tên, lọc theo danh mục; tải CSV |
+| **Nhập / Xuất kho** | Ghi phiếu nhập hoặc xuất, xem trước *tồn sau phiếu* và *thành tiền* (không cho xuất quá tồn kho); 12 giao dịch gần nhất |
+| **Sản phẩm & danh mục** | Thêm / sửa / xóa sản phẩm; thêm / xóa danh mục |
+| **Báo cáo** | Giá trị tồn theo danh mục, trạng thái theo danh mục, nhập/xuất theo tháng, top hàng xuất nhiều |
+| **Lịch sử giao dịch** | Lọc theo tên, loại, danh mục, khoảng ngày; tải CSV |
 
 **Ý nghĩa màu trạng thái:** 🟢 Đủ hàng · 🟠 Sắp hết (≤ mức tồn tối thiểu) · 🔴 Hết hàng.
 
