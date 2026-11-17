@@ -18,8 +18,9 @@ import sqlite3
 import pandas as pd
 
 ITERATIONS = 240_000
-MIN_PASSWORD = 8
-USERNAME_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
+MIN_PASSWORD = 6
+# Chữ không dấu, số, . _ -  và dấu cách ở giữa (ví dụ: "nhan vien 1")
+USERNAME_RE = re.compile(r"^[a-z0-9_.-]+( [a-z0-9_.-]+)*$")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -68,13 +69,14 @@ _DUMMY_HASH = hash_password(secrets.token_hex(8))
 # Kiểm tra dữ liệu nhập
 # ---------------------------------------------------------------------------
 def normalize_username(username: str) -> str:
-    return (username or "").strip().lower()
+    """Bỏ khoảng trắng thừa, viết thường: "  Nhan  Vien 1 " -> "nhan vien 1"."""
+    return " ".join((username or "").split()).lower()
 
 
 def _check_username(username: str) -> str:
     u = normalize_username(username)
-    if not USERNAME_RE.match(u):
-        raise ValueError("Tên tài khoản dài 3–32 ký tự, chỉ gồm chữ không dấu, số, dấu . _ -")
+    if not (3 <= len(u) <= 32 and USERNAME_RE.match(u)):
+        raise ValueError("Tên tài khoản dài 3–32 ký tự, chỉ gồm chữ không dấu, số, dấu cách và . _ -")
     return u
 
 
@@ -163,10 +165,37 @@ def delete_user(conn: sqlite3.Connection, user_id: int, acting_user_id: int) -> 
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
 
-def ensure_admin_from_secrets(conn: sqlite3.Connection, username: str | None,
-                              password: str | None) -> bool:
-    """Khi chưa có tài khoản nào: tạo quản trị viên từ cấu hình bí mật (nếu có)."""
-    if count_users(conn) > 0 or not username or not password:
-        return False
-    create_user(conn, username, password, full_name="Quản trị viên", is_admin=True)
-    return True
+def count_admins(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1").fetchone()[0]
+
+
+def user_exists(conn: sqlite3.Connection, username: str) -> bool:
+    return conn.execute("SELECT 1 FROM users WHERE username = ?",
+                        (normalize_username(username),)).fetchone() is not None
+
+
+def sync_from_secrets(conn: sqlite3.Connection, cfg) -> list[str]:
+    """Tạo các tài khoản khai báo trong mục [auth] của secrets (nếu chưa có).
+
+    [auth]
+    admin_username = "quanly"
+    admin_password = "..."
+
+    [auth.staff]                 # tài khoản nhân viên (chỉ xem): "tên" = "mật khẩu"
+    "nhan vien 1" = "..."
+
+    Tài khoản đã tồn tại thì giữ nguyên (không ghi đè mật khẩu người dùng đã tự đổi).
+    Trả về danh sách tài khoản vừa tạo.
+    """
+    created = []
+    if not cfg:
+        return created
+    admin_user, admin_pw = cfg.get("admin_username"), cfg.get("admin_password")
+    if admin_user and admin_pw and not user_exists(conn, admin_user):
+        create_user(conn, admin_user, str(admin_pw), full_name="Quản trị viên", is_admin=True)
+        created.append(normalize_username(admin_user))
+    for username, pw in dict(cfg.get("staff", {}) or {}).items():
+        if not user_exists(conn, username):
+            create_user(conn, username, str(pw), full_name=" ".join(str(username).split()).title())
+            created.append(normalize_username(username))
+    return created
