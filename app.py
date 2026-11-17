@@ -17,6 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from src import auth
 from src import database as db
 from src import inventory
 from src.catalog import (
@@ -94,16 +95,27 @@ CSS = """
 """
 
 
+def _secret_admin() -> tuple[str | None, str | None]:
+    """Tài khoản quản trị đầu tiên lấy từ .streamlit/secrets.toml (mục [auth]), nếu có."""
+    try:
+        cfg = st.secrets.get("auth", {})
+        return cfg.get("admin_username"), cfg.get("admin_password")
+    except Exception:  # chưa có file secrets
+        return None, None
+
+
 @st.cache_resource
 def _init() -> bool:
     db.init_db()
+    with db.connect() as c:
+        auth.init(c)
+        auth.ensure_admin_from_secrets(c, *_secret_admin())
     return True
 
 
 _init()
 conn = db.connect()
 st.html(CSS)
-st.logo(LOGO, size="large")
 
 
 def notify(msg: str, icon: str = ":material/check_circle:") -> None:
@@ -114,6 +126,89 @@ def notify(msg: str, icon: str = ":material/check_circle:") -> None:
 if "_flash" in st.session_state:
     _msg, _icon = st.session_state.pop("_flash")
     st.toast(_msg, icon=_icon)
+
+
+# ===========================================================================
+# ĐĂNG NHẬP
+# ===========================================================================
+MAX_TRIES = 5          # sai quá số lần này thì phải chờ
+LOCK_SECONDS = 60
+LOGO_DARK = """<svg aria-hidden="true" width="40" height="40" viewBox="0 0 32 32" fill="none"
+stroke="#14532D" stroke-width="2" stroke-linejoin="round"><path d="M4 11 16 5l12 6v11l-12 6-12-6z"/>
+<path d="M4 11l12 6 12-6M16 17v11"/></svg>"""
+
+
+def page_login() -> None:
+    _, mid, _ = st.columns([1, 1.3, 1])
+    with mid:
+        st.html(f"""<div style="display:flex;align-items:center;gap:12px;margin:48px 0 8px">{LOGO_DARK}
+<div><div style="font-size:22px;font-weight:700;letter-spacing:-0.01em">Sổ Kho</div>
+<div style="font-size:13px;color:{MUTED}">Nhu yếu phẩm hằng ngày</div></div></div>""")
+        with st.container(border=True, key="card_login"):
+            if auth.count_users(conn) == 0:
+                _first_admin_form()
+            else:
+                _login_form()
+
+
+def _first_admin_form() -> None:
+    st.markdown("#### Tạo tài khoản quản trị")
+    st.caption("Chưa có tài khoản nào. Tài khoản đầu tiên sẽ là quản trị viên, "
+               "có quyền thêm tài khoản cho người khác.")
+    with st.form("first_admin", border=False):
+        name = st.text_input("Họ tên")
+        username = st.text_input("Tên tài khoản", placeholder="ví dụ: quanly")
+        pw = st.text_input("Mật khẩu", type="password", help=f"Ít nhất {auth.MIN_PASSWORD} ký tự.")
+        pw2 = st.text_input("Nhập lại mật khẩu", type="password")
+        if st.form_submit_button("Tạo tài khoản và vào trang", type="primary", width="stretch"):
+            try:
+                uid = auth.create_user(conn, username, pw, name, is_admin=True, confirm=pw2)
+                st.session_state["uid"] = uid
+                notify("Đã tạo tài khoản quản trị.")
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+
+def _login_form() -> None:
+    st.markdown("#### Đăng nhập")
+    now = dt.datetime.now().timestamp()
+    locked_until = st.session_state.get("lock_until", 0)
+    with st.form("login", border=False):
+        username = st.text_input("Tài khoản", autocomplete="username")
+        pw = st.text_input("Mật khẩu", type="password", autocomplete="current-password")
+        submitted = st.form_submit_button("Đăng nhập", type="primary", width="stretch")
+    if submitted:
+        if now < locked_until:
+            st.error(f"Bạn đã nhập sai {MAX_TRIES} lần. Thử lại sau {int(locked_until - now) + 1} giây.")
+            return
+        user = auth.authenticate(conn, username, pw)
+        if user is None:
+            tries = st.session_state.get("tries", 0) + 1
+            st.session_state["tries"] = tries
+            if tries >= MAX_TRIES:
+                st.session_state["tries"] = 0
+                st.session_state["lock_until"] = now + LOCK_SECONDS
+                st.error(f"Sai tài khoản hoặc mật khẩu {MAX_TRIES} lần. Vui lòng chờ {LOCK_SECONDS} giây.")
+            else:
+                st.error("Sai tài khoản hoặc mật khẩu.")
+            return
+        st.session_state.pop("tries", None)
+        st.session_state.pop("lock_until", None)
+        st.session_state["uid"] = user["id"]
+        notify(f"Xin chào, {user['full_name']}!")
+        st.rerun()
+    st.caption("Quên mật khẩu? Nhờ quản trị viên đặt lại ở trang Tài khoản.")
+
+
+USER = auth.get_user(conn, st.session_state["uid"]) if st.session_state.get("uid") else None
+if USER is None:
+    st.session_state.pop("uid", None)
+    st.navigation([st.Page(page_login, title="Đăng nhập", icon=":material/lock:",
+                           url_path="dang-nhap")], position="hidden").run()
+    st.stop()
+
+st.logo(LOGO, size="large")
 
 cats = db.categories_df(conn)
 products = db.products_df(conn)
@@ -513,6 +608,84 @@ def page_history() -> None:
                                        f"Xuất {fmt_money(total_out)}")
 
 
+# ===========================================================================
+# TRANG 6 – TÀI KHOẢN
+# ===========================================================================
+def page_account() -> None:
+    page_head("Tài khoản", f"{USER['full_name']} · {USER['username']}"
+              + (" · quản trị viên" if USER["is_admin"] else ""))
+    left, right = st.columns([1, 1], gap="large")
+
+    with left, st.container(border=True, key="card_pw"):
+        st.markdown("#### Đổi mật khẩu")
+        with st.form("change_pw", clear_on_submit=True, border=False):
+            old = st.text_input("Mật khẩu hiện tại", type="password", autocomplete="current-password")
+            new = st.text_input("Mật khẩu mới", type="password", autocomplete="new-password",
+                                help=f"Ít nhất {auth.MIN_PASSWORD} ký tự.")
+            new2 = st.text_input("Nhập lại mật khẩu mới", type="password", autocomplete="new-password")
+            if st.form_submit_button("Đổi mật khẩu", type="primary"):
+                try:
+                    auth.change_password(conn, USER["id"], old, new, new2)
+                    notify("Đã đổi mật khẩu.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
+    if not USER["is_admin"]:
+        return
+
+    with right, st.container(border=True, key="card_newuser"):
+        st.markdown("#### Thêm tài khoản")
+        with st.form("new_user", clear_on_submit=True, border=False):
+            name = st.text_input("Họ tên")
+            username = st.text_input("Tên tài khoản", placeholder="ví dụ: nhanvien1")
+            pw = st.text_input("Mật khẩu", type="password", autocomplete="new-password",
+                               help=f"Ít nhất {auth.MIN_PASSWORD} ký tự. Người dùng tự đổi sau khi đăng nhập.")
+            is_admin = st.checkbox("Quản trị viên (được quản lý tài khoản)")
+            if st.form_submit_button("Thêm tài khoản", type="primary", icon=":material/person_add:"):
+                try:
+                    auth.create_user(conn, username, pw, name, is_admin=is_admin)
+                    notify(f"Đã thêm tài khoản “{auth.normalize_username(username)}”.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+
+    with st.container(border=True, key="card_users"):
+        st.markdown("#### Danh sách tài khoản")
+        users = auth.users_df(conn)
+        st.dataframe(pd.DataFrame({
+            "Tài khoản": users["username"], "Họ tên": users["full_name"],
+            "Vai trò": users["is_admin"].map({1: "Quản trị viên", 0: "Nhân viên"}),
+            "Ngày tạo": users["created_at"],
+        }), hide_index=True, width="stretch")
+
+        others = users[users["id"] != USER["id"]]
+        if others.empty:
+            return
+        by_id = others.set_index("id")
+        a, b = st.columns(2, vertical_alignment="bottom")
+        uid = a.selectbox("Chọn tài khoản", by_id.index.tolist(),
+                          format_func=lambda i: f"{by_id.at[i, 'username']} — {by_id.at[i, 'full_name'] or ''}")
+        with b.popover("Đặt lại mật khẩu", icon=":material/key:"):
+            with st.form(f"reset_{uid}", border=False):
+                newpw = st.text_input("Mật khẩu mới", type="password", autocomplete="new-password")
+                if st.form_submit_button("Đặt lại", type="primary"):
+                    try:
+                        auth.reset_password(conn, int(uid), newpw)
+                        notify(f"Đã đặt lại mật khẩu cho “{by_id.at[uid, 'username']}”.")
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+        confirm = st.checkbox(f"Tôi muốn xóa tài khoản “{by_id.at[uid, 'username']}”", key=f"del_user_{uid}")
+        if st.button("Xóa tài khoản", disabled=not confirm, icon=":material/person_remove:"):
+            try:
+                auth.delete_user(conn, int(uid), USER["id"])
+                notify(f"Đã xóa tài khoản “{by_id.at[uid, 'username']}”.", ":material/delete:")
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+
 # ---------------------------------------------------------------------------
 # Điều hướng (thanh bên)
 # ---------------------------------------------------------------------------
@@ -525,5 +698,15 @@ pg_report = st.Page(page_report, title="Báo cáo", icon=":material/bar_chart:",
 pg_history = st.Page(page_history, title="Lịch sử giao dịch", icon=":material/receipt_long:",
                      url_path="lich-su")
 
-nav = st.navigation([pg_stock, pg_tx, pg_products, pg_report, pg_history])
+pg_account = st.Page(page_account, title="Tài khoản", icon=":material/manage_accounts:",
+                     url_path="tai-khoan")
+
+with st.sidebar:
+    st.caption(f"Đang đăng nhập: **{USER['full_name']}** ({USER['username']})"
+               + (" · quản trị" if USER["is_admin"] else ""))
+    if st.button("Đăng xuất", icon=":material/logout:"):
+        st.session_state.clear()
+        st.rerun()
+
+nav = st.navigation([pg_stock, pg_tx, pg_products, pg_report, pg_history, pg_account])
 nav.run()
