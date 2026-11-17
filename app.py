@@ -264,7 +264,7 @@ def plot_layout(fig: go.Figure, title: str, height: int = 340, **kw) -> go.Figur
 def page_stock() -> None:
     n_cats = stock["category"].nunique()
     page_head("Tồn kho", f"Tính đến {AS_OF} · {len(stock)} mặt hàng trong {n_cats} danh mục",
-              (pg_tx, "Ghi nhập / xuất"))
+              (pg_tx, "Ghi nhập / xuất") if USER["is_admin"] else None)
 
     counts = {s: int((stock["status"] == s).sum()) for s in STATUSES}
     st.html(f"""
@@ -641,7 +641,8 @@ def page_account() -> None:
             username = st.text_input("Tên tài khoản", placeholder="ví dụ: nhanvien1")
             pw = st.text_input("Mật khẩu", type="password", autocomplete="new-password",
                                help=f"Ít nhất {auth.MIN_PASSWORD} ký tự. Người dùng tự đổi sau khi đăng nhập.")
-            is_admin = st.checkbox("Quản trị viên (được quản lý tài khoản)")
+            is_admin = st.checkbox("Quản trị viên (được sửa dữ liệu và quản lý tài khoản)",
+                                   help="Bỏ trống: tài khoản nhân viên, chỉ được xem Tồn kho, Báo cáo, Lịch sử.")
             if st.form_submit_button("Thêm tài khoản", type="primary", icon=":material/person_add:"):
                 try:
                     auth.create_user(conn, username, pw, name, is_admin=is_admin)
@@ -655,7 +656,7 @@ def page_account() -> None:
         users = auth.users_df(conn)
         st.dataframe(pd.DataFrame({
             "Tài khoản": users["username"], "Họ tên": users["full_name"],
-            "Vai trò": users["is_admin"].map({1: "Quản trị viên", 0: "Nhân viên"}),
+            "Vai trò": users["is_admin"].map({1: "Quản trị viên", 0: "Nhân viên (chỉ xem)"}),
             "Ngày tạo": users["created_at"],
         }), hide_index=True, width="stretch")
 
@@ -703,10 +704,16 @@ pg_account = st.Page(page_account, title="Tài khoản", icon=":material/manage_
 
 with st.sidebar:
     st.caption(f"Đang đăng nhập: **{USER['full_name']}** ({USER['username']})"
-               + (" · quản trị" if USER["is_admin"] else ""))
+               + (" · quản trị" if USER["is_admin"] else " · nhân viên, chỉ xem"))
     if st.button("Đăng xuất", icon=":material/logout:"):
         st.session_state.clear()
         st.rerun()
 
-nav = st.navigation([pg_stock, pg_tx, pg_products, pg_report, pg_history, pg_account])
+# Quản trị viên: mọi trang. Nhân viên: chỉ các trang xem (không ghi phiếu, không sửa sản phẩm).
+# Trang không có trong danh sách thì không mở được, kể cả khi gõ thẳng địa chỉ.
+if USER["is_admin"]:
+    pages = [pg_stock, pg_tx, pg_products, pg_report, pg_history, pg_account]
+else:
+    pages = [pg_stock, pg_report, pg_history, pg_account]
+nav = st.navigation(pages)
 nav.run()

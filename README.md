@@ -115,6 +115,14 @@ khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm tron
   `.streamlit/secrets.toml.example`); trên Streamlit Cloud dán vào *Settings → Secrets*.
 - Trang **Tài khoản**: ai cũng đổi được mật khẩu của mình; quản trị viên thêm / xóa
   tài khoản và đặt lại mật khẩu cho người khác.
+- Hai loại tài khoản:
+
+  | Loại | Thấy các trang |
+  |------|----------------|
+  | **Quản trị viên** | Tất cả: Tồn kho, Nhập / Xuất kho, Sản phẩm & danh mục, Báo cáo, Lịch sử, Tài khoản |
+  | **Nhân viên (chỉ xem)** | Tồn kho, Báo cáo, Lịch sử giao dịch, Tài khoản (đổi mật khẩu). Không ghi phiếu, không sửa sản phẩm / danh mục |
+
+  Khi thêm tài khoản, bỏ trống ô *Quản trị viên* là tạo tài khoản nhân viên.
 - Mật khẩu được băm (PBKDF2-SHA256, có salt), không lưu dạng chữ thường.
   Nhập sai 5 lần liên tiếp phải chờ 60 giây.
 - Tải lại trang (F5) sẽ phải đăng nhập lại.
