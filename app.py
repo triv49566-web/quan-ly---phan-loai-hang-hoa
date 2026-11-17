@@ -95,13 +95,12 @@ CSS = """
 """
 
 
-def _secret_admin() -> tuple[str | None, str | None]:
-    """Tài khoản quản trị đầu tiên lấy từ .streamlit/secrets.toml (mục [auth]), nếu có."""
+def _secret_auth() -> dict:
+    """Mục [auth] trong .streamlit/secrets.toml (hoặc Settings → Secrets trên Streamlit Cloud)."""
     try:
-        cfg = st.secrets.get("auth", {})
-        return cfg.get("admin_username"), cfg.get("admin_password")
+        return st.secrets.get("auth", {}) or {}
     except Exception:  # chưa có file secrets
-        return None, None
+        return {}
 
 
 @st.cache_resource
@@ -109,7 +108,7 @@ def _init() -> bool:
     db.init_db()
     with db.connect() as c:
         auth.init(c)
-        auth.ensure_admin_from_secrets(c, *_secret_admin())
+        auth.sync_from_secrets(c, _secret_auth())
     return True
 
 
@@ -149,12 +148,15 @@ def page_login() -> None:
                 _first_admin_form()
             else:
                 _login_form()
+        if auth.count_users(conn) > 0 and auth.count_admins(conn) == 0:
+            with st.expander("Chưa có tài khoản quản trị: tạo ngay", icon=":material/admin_panel_settings:"):
+                _first_admin_form()
 
 
 def _first_admin_form() -> None:
     st.markdown("#### Tạo tài khoản quản trị")
-    st.caption("Chưa có tài khoản nào. Tài khoản đầu tiên sẽ là quản trị viên, "
-               "có quyền thêm tài khoản cho người khác.")
+    st.caption("Chưa có tài khoản quản trị nào. Tài khoản tạo ở đây là quản trị viên, "
+               "có quyền sửa dữ liệu và thêm tài khoản cho người khác.")
     with st.form("first_admin", border=False):
         name = st.text_input("Họ tên")
         username = st.text_input("Tên tài khoản", placeholder="ví dụ: quanly")
