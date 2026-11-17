@@ -38,6 +38,7 @@ quan_ly_hang_hoa/
 │       └── transactions.csv      # Lịch sử nhập / xuất mẫu
 └── src/
     ├── __init__.py
+    ├── auth.py                   # Tài khoản đăng nhập, băm mật khẩu
     ├── catalog.py                # Danh mục mặc định, đơn vị tính, quy tắc trạng thái tồn kho
     ├── database.py               # Lưu trữ SQLite: tạo bảng, đọc / ghi, kiểm tra dữ liệu
     └── inventory.py              # Tính tồn kho, giá trị, số ngày đủ dùng, báo cáo
@@ -106,6 +107,17 @@ khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm tron
 | **Sản phẩm & danh mục** | Thêm / sửa / xóa sản phẩm; thêm / xóa danh mục |
 | **Báo cáo** | Giá trị tồn theo danh mục, trạng thái theo danh mục, nhập/xuất theo tháng, top hàng xuất nhiều |
 | **Lịch sử giao dịch** | Lọc theo tên, loại, danh mục, khoảng ngày; tải CSV |
+
+**Đăng nhập:**
+- Mọi trang đều cần đăng nhập bằng *tài khoản* và *mật khẩu*.
+- Lần đầu mở app (chưa có tài khoản nào) sẽ hiện màn hình **Tạo tài khoản quản trị**.
+  Hoặc đặt sẵn tài khoản quản trị trong `.streamlit/secrets.toml` (xem
+  `.streamlit/secrets.toml.example`); trên Streamlit Cloud dán vào *Settings → Secrets*.
+- Trang **Tài khoản**: ai cũng đổi được mật khẩu của mình; quản trị viên thêm / xóa
+  tài khoản và đặt lại mật khẩu cho người khác.
+- Mật khẩu được băm (PBKDF2-SHA256, có salt), không lưu dạng chữ thường.
+  Nhập sai 5 lần liên tiếp phải chờ 60 giây.
+- Tải lại trang (F5) sẽ phải đăng nhập lại.
 
 **Ý nghĩa màu trạng thái:** 🟢 Đủ hàng · 🟠 Sắp hết (≤ mức tồn tối thiểu) · 🔴 Hết hàng.
 
