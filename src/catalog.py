@@ -17,6 +17,7 @@ DEFAULT_CATEGORIES = [
     ("Gia vị", "Muối, tiêu, bột ngọt, đường, nước mắm, nước tương"),
     ("Dầu ăn", "Dầu thực vật, dầu đậu nành, dầu mè"),
     ("Đồ khô", "Đậu, hạt, đồ khô đóng gói"),
+    ("Thực phẩm tươi", "Trứng, thực phẩm mau hỏng cần bán nhanh"),
 ]
 
 UNCATEGORIZED = "Chưa phân loại"
@@ -27,7 +28,24 @@ UNITS = ["kg", "g", "lít", "ml", "gói", "chai", "hộp", "lon", "túi", "quả
 # Loại giao dịch kho
 TX_IN = "in"
 TX_OUT = "out"
-TX_LABEL = {TX_IN: "Nhập kho", TX_OUT: "Xuất kho"}
+TX_DISPOSE = "dispose"          # hủy hàng hết hạn / hư hỏng
+TX_TYPES = [TX_IN, TX_OUT, TX_DISPOSE]
+TX_LABEL = {TX_IN: "Nhập kho", TX_OUT: "Xuất kho", TX_DISPOSE: "Hủy hàng"}
+
+# Phân loại bảo quản theo hạn sử dụng (số ngày kể từ khi nhập)
+LONG_LIFE_DAYS = 90
+LONG_LIFE = "Để lâu được"
+SHORT_LIFE = "Mau hỏng"
+
+
+def storage_class(shelf_life_days: float) -> str:
+    """Hạn dùng ≥ 90 ngày: để lâu được; ngắn hơn: mau hỏng, phải bán nhanh."""
+    return LONG_LIFE if shelf_life_days >= LONG_LIFE_DAYS else SHORT_LIFE
+
+
+def near_expiry_days(shelf_life_days: float) -> int:
+    """Còn ≤ số ngày này là “cận hạn”: 20% hạn dùng, tối thiểu 2 ngày, tối đa 30 ngày."""
+    return int(min(30, max(2, round(shelf_life_days * 0.2))))
 
 # Trạng thái tồn kho
 IN_STOCK = "Đủ hàng"

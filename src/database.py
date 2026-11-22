@@ -16,7 +16,7 @@ import sqlite3
 import pandas as pd
 
 from . import catalog
-from .catalog import TX_IN, TX_OUT
+from .catalog import TX_DISPOSE, TX_IN, TX_OUT, TX_TYPES
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(ROOT, "data", "hanghoa.db")
@@ -34,14 +34,15 @@ CREATE TABLE IF NOT EXISTS products (
     category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
     unit        TEXT NOT NULL,
     price       REAL NOT NULL DEFAULT 0,      -- đơn giá tham khảo (đ / đơn vị)
-    min_stock   REAL NOT NULL DEFAULT 0,      -- mức tồn tối thiểu để cảnh báo
+    min_stock   REAL NOT NULL DEFAULT 0,      -- mức tồn tối thiểu (lượng dự trữ) để cảnh báo
+    shelf_life_days INTEGER NOT NULL DEFAULT 365,  -- hạn sử dụng tính từ ngày nhập
     note        TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS transactions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,                -- YYYY-MM-DD
     product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    type        TEXT NOT NULL CHECK (type IN ('in', 'out')),
+    type        TEXT NOT NULL CHECK (type IN ('in', 'out', 'dispose')),  -- nhập / xuất / hủy
     quantity    REAL NOT NULL CHECK (quantity > 0),
     unit_price  REAL NOT NULL DEFAULT 0,
     note        TEXT DEFAULT ''
@@ -65,11 +66,35 @@ def init_db(path: str | None = None, seed: bool = True) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with connect(path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
             conn.executemany("INSERT INTO categories(name, description) VALUES (?, ?)",
                              catalog.DEFAULT_CATEGORIES)
         if seed and conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
             _seed_from_csv(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Nâng cấp file dữ liệu tạo từ phiên bản cũ (thiếu hạn dùng / phiếu hủy hàng)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(products)")}
+    if "shelf_life_days" not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN shelf_life_days INTEGER NOT NULL DEFAULT 365")
+    sql = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'transactions'").fetchone()[0]
+    if "dispose" not in sql:
+        conn.executescript("""
+            ALTER TABLE transactions RENAME TO transactions_old;
+            CREATE TABLE transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                type TEXT NOT NULL CHECK (type IN ('in', 'out', 'dispose')),
+                quantity REAL NOT NULL CHECK (quantity > 0),
+                unit_price REAL NOT NULL DEFAULT 0,
+                note TEXT DEFAULT ''
+            );
+            INSERT INTO transactions SELECT * FROM transactions_old;
+            DROP TABLE transactions_old;
+        """)
 
 
 def _seed_from_csv(conn: sqlite3.Connection) -> None:
@@ -83,10 +108,11 @@ def _seed_from_csv(conn: sqlite3.Connection) -> None:
         if p.category not in cat_ids:
             cur = conn.execute("INSERT INTO categories(name) VALUES (?)", (p.category,))
             cat_ids[p.category] = cur.lastrowid
+        shelf = int(getattr(p, "shelf_life_days", 365))
         conn.execute(
-            "INSERT INTO products(name, category_id, unit, price, min_stock, note)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (p.name, cat_ids[p.category], p.unit, float(p.price), float(p.min_stock), p.note))
+            "INSERT INTO products(name, category_id, unit, price, min_stock, shelf_life_days, note)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (p.name, cat_ids[p.category], p.unit, float(p.price), float(p.min_stock), shelf, p.note))
     if os.path.exists(tx_csv):
         prod_ids = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM products")}
         tx = pd.read_csv(tx_csv, encoding="utf-8-sig").fillna({"note": ""})
@@ -110,7 +136,7 @@ def categories_df(conn: sqlite3.Connection) -> pd.DataFrame:
 def products_df(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(
         "SELECT p.id, p.name, p.category_id, c.name AS category, p.unit, p.price, "
-        "p.min_stock, p.note FROM products p "
+        "p.min_stock, p.shelf_life_days, p.note FROM products p "
         "LEFT JOIN categories c ON c.id = p.category_id ORDER BY c.name, p.name", conn)
 
 
@@ -135,6 +161,12 @@ def current_stock(conn: sqlite3.Connection, product_id: int) -> float:
 # ---------------------------------------------------------------------------
 # Ghi dữ liệu (ném ValueError kèm thông báo tiếng Việt khi dữ liệu sai)
 # ---------------------------------------------------------------------------
+def _check_shelf(shelf_life_days: float) -> int:
+    if not shelf_life_days or shelf_life_days < 1:
+        raise ValueError("Hạn sử dụng phải từ 1 ngày trở lên.")
+    return int(shelf_life_days)
+
+
 def _check_product(name: str, unit: str, price: float, min_stock: float) -> None:
     if not name.strip():
         raise ValueError("Tên sản phẩm không được để trống.")
@@ -163,17 +195,19 @@ def delete_category(conn: sqlite3.Connection, category_id: int) -> None:
 
 def add_product(conn: sqlite3.Connection, name: str, category_id: int | None, unit: str,
                 price: float, min_stock: float, note: str = "",
-                opening_qty: float = 0, date: dt.date | None = None) -> int:
+                opening_qty: float = 0, date: dt.date | None = None,
+                shelf_life_days: int = 365) -> int:
     """Thêm sản phẩm; nếu opening_qty > 0 thì ghi luôn một phiếu nhập tồn đầu."""
     _check_product(name, unit, price, min_stock)
+    shelf = _check_shelf(shelf_life_days)
     if opening_qty < 0:
         raise ValueError("Số lượng tồn đầu phải ≥ 0.")
     try:
         with conn:
             cur = conn.execute(
-                "INSERT INTO products(name, category_id, unit, price, min_stock, note)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (name.strip(), category_id, unit, price, min_stock, note.strip()))
+                "INSERT INTO products(name, category_id, unit, price, min_stock, shelf_life_days, note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (name.strip(), category_id, unit, price, min_stock, shelf, note.strip()))
             pid = cur.lastrowid
             if opening_qty > 0:
                 conn.execute(
@@ -187,14 +221,15 @@ def add_product(conn: sqlite3.Connection, name: str, category_id: int | None, un
 
 def update_product(conn: sqlite3.Connection, product_id: int, name: str,
                    category_id: int | None, unit: str, price: float,
-                   min_stock: float, note: str = "") -> None:
+                   min_stock: float, note: str = "", shelf_life_days: int = 365) -> None:
     _check_product(name, unit, price, min_stock)
+    shelf = _check_shelf(shelf_life_days)
     try:
         with conn:
             conn.execute(
-                "UPDATE products SET name=?, category_id=?, unit=?, price=?, min_stock=?, note=?"
-                " WHERE id=?",
-                (name.strip(), category_id, unit, price, min_stock, note.strip(), product_id))
+                "UPDATE products SET name=?, category_id=?, unit=?, price=?, min_stock=?,"
+                " shelf_life_days=?, note=? WHERE id=?",
+                (name.strip(), category_id, unit, price, min_stock, shelf, note.strip(), product_id))
     except sqlite3.IntegrityError:
         raise ValueError(f"Sản phẩm “{name}” đã tồn tại.") from None
 
@@ -208,17 +243,18 @@ def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
 def add_transaction(conn: sqlite3.Connection, product_id: int, tx_type: str,
                     quantity: float, unit_price: float,
                     date: dt.date | None = None, note: str = "") -> None:
-    """Ghi một phiếu nhập / xuất kho. Không cho xuất vượt quá tồn kho."""
-    if tx_type not in (TX_IN, TX_OUT):
+    """Ghi một phiếu nhập / xuất / hủy hàng. Không cho xuất hoặc hủy vượt quá tồn kho."""
+    if tx_type not in TX_TYPES:
         raise ValueError("Loại giao dịch không hợp lệ.")
     if quantity <= 0:
         raise ValueError("Số lượng phải lớn hơn 0.")
     if unit_price < 0:
         raise ValueError("Đơn giá phải ≥ 0.")
-    if tx_type == TX_OUT:
+    if tx_type in (TX_OUT, TX_DISPOSE):
         stock = current_stock(conn, product_id)
         if quantity > stock:
-            raise ValueError(f"Không đủ hàng để xuất: chỉ còn {catalog.fmt_qty(stock)}.")
+            verb = "xuất" if tx_type == TX_OUT else "hủy"
+            raise ValueError(f"Không đủ hàng để {verb}: chỉ còn {catalog.fmt_qty(stock)}.")
     with conn:
         conn.execute(
             "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note)"

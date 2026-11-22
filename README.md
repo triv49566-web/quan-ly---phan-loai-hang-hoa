@@ -25,7 +25,7 @@ thử ngay.
 
 ```
 quan_ly_hang_hoa/
-├── app.py                        # Ứng dụng Streamlit (giao diện chính, 5 tab)
+├── app.py                        # Ứng dụng Streamlit (giao diện, 9 trang)
 ├── requirements.txt              # Thư viện cần cài
 ├── README.md                     # Tài liệu này
 ├── .streamlit/
@@ -34,14 +34,16 @@ quan_ly_hang_hoa/
 │   ├── generate_sample_data.py   # Script sinh dữ liệu mẫu (seed cố định → tái lập)
 │   ├── hanghoa.db                # CSDL SQLite (tự tạo khi chạy lần đầu, không đưa lên git)
 │   └── raw/
-│       ├── products.csv          # 16 sản phẩm mẫu
-│       └── transactions.csv      # Lịch sử nhập / xuất mẫu
+│       ├── products.csv          # 18 sản phẩm mẫu (có hạn sử dụng)
+│       └── transactions.csv      # Lịch sử nhập / xuất / hủy năm 2026
 └── src/
     ├── __init__.py
     ├── auth.py                   # Tài khoản đăng nhập, băm mật khẩu
     ├── catalog.py                # Danh mục mặc định, đơn vị tính, quy tắc trạng thái tồn kho
     ├── database.py               # Lưu trữ SQLite: tạo bảng, đọc / ghi, kiểm tra dữ liệu
-    └── inventory.py              # Tính tồn kho, giá trị, số ngày đủ dùng, báo cáo
+    ├── inventory.py              # Tồn kho, tồn theo ngày, lô hàng & hạn dùng, báo cáo cuối ngày
+    ├── kpi.py                    # KPI quy trình quản lý kho: tiêu chí, chỉ số, tiêu chuẩn, cải tiến
+    └── risk.py                   # Quản lý rủi ro: nhận diện, đánh giá, biện pháp
 ```
 
 **Vai trò từng lớp** (tách bạch dữ liệu – logic – giao diện):
@@ -49,7 +51,7 @@ quan_ly_hang_hoa/
 | Lớp | File | Nhiệm vụ |
 |-----|------|----------|
 | Dữ liệu | `data/`, `src/database.py` | Sinh dữ liệu mẫu, lưu trữ SQLite |
-| Logic | `src/catalog.py`, `src/inventory.py` | Quy tắc phân loại, tính tồn kho & báo cáo |
+| Logic | `src/catalog.py`, `src/inventory.py`, `src/kpi.py`, `src/risk.py` | Phân loại, tồn kho, KPI, rủi ro |
 | Giao diện | `app.py` | Hiển thị, lọc, nhập liệu, vẽ biểu đồ |
 
 > Nhờ tách lớp, bạn có thể dùng lại `src/` trong notebook, script khác hoặc
@@ -98,15 +100,19 @@ Giao diện **“Sổ Kho”**: thanh điều hướng xanh đậm bên trái, n
 khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm trong
 `.streamlit/config.toml`, phần trang trí thêm nằm ở biến `CSS` trong `app.py`.
 
-**5 trang (chọn ở thanh bên):**
+**Các trang (chọn ở thanh bên, chia 3 nhóm):**
 
-| Trang | Công dụng |
-|-------|-----------|
-| **Tồn kho** | 4 ô tổng quan, khối *Cần nhập hàng*, bảng tồn kho có thanh so với mức tối thiểu; tìm theo tên, lọc theo danh mục; tải CSV |
-| **Nhập / Xuất kho** | Ghi phiếu nhập hoặc xuất, xem trước *tồn sau phiếu* và *thành tiền* (không cho xuất quá tồn kho); 12 giao dịch gần nhất |
-| **Sản phẩm & danh mục** | Thêm / sửa / xóa sản phẩm; thêm / xóa danh mục |
-| **Báo cáo** | Giá trị tồn theo danh mục, trạng thái theo danh mục, nhập/xuất theo tháng, top hàng xuất nhiều |
-| **Lịch sử giao dịch** | Lọc theo tên, loại, danh mục, khoảng ngày; tải CSV |
+| Nhóm | Trang | Công dụng |
+|------|-------|-----------|
+| Kho hàng | **Tồn kho** | Ô tổng quan, khối *Cần nhập hàng*, bảng tồn kho; lọc theo danh mục và **nhóm bảo quản** (*Để lâu được* / *Mau hỏng*), hạn dùng và lô gần hết hạn |
+| | **Nhập / Xuất kho** | Ghi phiếu **nhập**, **xuất** hoặc **hủy hàng** (hết hạn / hư hỏng); không cho xuất / hủy quá tồn kho |
+| | **Sản phẩm & danh mục** | Thêm / sửa / xóa sản phẩm (có **hạn sử dụng**, **mức dự trữ**); thêm / xóa danh mục |
+| | **Lịch sử giao dịch** | Lọc theo tên, loại, danh mục, khoảng ngày; tải CSV |
+| Báo cáo & đánh giá | **Báo cáo cuối ngày** | Chọn ngày: tồn đầu ngày, nhập, xuất, hủy, tồn cuối ngày, hàng cận hạn, hàng dưới mức dự trữ; tải CSV |
+| | **Đánh giá KPI theo quý** | Điểm tổng hợp & **xếp loại người phụ trách kho**, bảng *Tiêu chí – Chỉ số – Tiêu chuẩn*, so sánh với quý trước (cải thiện / xấu đi), biểu đồ xu hướng, **phương án cải tiến**; tải CSV |
+| | **Báo cáo** | Biểu đồ: giá trị tồn theo danh mục, trạng thái, nhập / xuất / hủy **theo tháng hoặc theo quý**, top hàng xuất nhiều, tồn theo nhóm bảo quản, hàng hủy theo quý |
+| | **Quản lý rủi ro** | Danh sách rủi ro (hết hàng, dưới dự trữ, cận hạn, quá hạn, tồn đọng), **ma trận rủi ro** khả năng × ảnh hưởng, biện pháp xử lý; tải CSV |
+| Hệ thống | **Tài khoản** | Đổi mật khẩu; quản trị viên quản lý tài khoản |
 
 **Đăng nhập:**
 - Mọi trang đều cần đăng nhập bằng *tài khoản* và *mật khẩu*.
@@ -119,8 +125,8 @@ khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm tron
 
   | Loại | Thấy các trang |
   |------|----------------|
-  | **Quản trị viên** | Tất cả: Tồn kho, Nhập / Xuất kho, Sản phẩm & danh mục, Báo cáo, Lịch sử, Tài khoản |
-  | **Nhân viên (chỉ xem)** | Tồn kho, Báo cáo, Lịch sử giao dịch, Tài khoản (đổi mật khẩu). Không ghi phiếu, không sửa sản phẩm / danh mục |
+  | **Quản trị viên** | Tất cả các trang |
+  | **Nhân viên (chỉ xem)** | Tồn kho, Lịch sử giao dịch, 4 trang báo cáo & đánh giá, Tài khoản (đổi mật khẩu). Không ghi phiếu, không sửa sản phẩm / danh mục |
 
   Khi thêm tài khoản, bỏ trống ô *Quản trị viên* là tạo tài khoản nhân viên.
 - Mật khẩu được băm (PBKDF2-SHA256, có salt), không lưu dạng chữ thường.
@@ -133,10 +139,13 @@ khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm tron
 
 ## 4. Bộ dữ liệu mẫu
 
-5 danh mục: *Sữa & đồ uống, Lương thực, Gia vị, Dầu ăn, Đồ khô*.
-Mô phỏng từ 01/08/2026 đến 12/11/2026: mỗi ngày xuất bán ngẫu nhiên quanh mức
-tiêu thụ bình quân, tồn thấp thì nhập lô mới. Một vài mặt hàng ngừng nhập cuối
-kỳ để có ví dụ *Sắp hết / Hết hàng*.
+6 danh mục: *Sữa & đồ uống, Lương thực, Gia vị, Dầu ăn, Đồ khô, Thực phẩm tươi*.
+Mô phỏng từ **01/01/2026 đến 12/11/2026 (4 quý)**:
+- mỗi ngày xuất bán ngẫu nhiên quanh mức tiêu thụ bình quân (Tết tháng 1–2 bán chạy hơn);
+- hàng nhập theo lô, xuất theo **nhập trước – xuất trước**; lô quá hạn bị **hủy**;
+- quy trình được **cải tiến dần qua từng quý** (nhập kịp thời hơn, lô hàng mau hỏng nhỏ lại)
+  nên KPI tăng từ loại B (quý 1) lên loại A (quý 3) và hàng hủy giảm rõ;
+- vài mặt hàng ngừng nhập cuối kỳ để có ví dụ *Sắp hết / Hết hàng*.
 
 **`products.csv`**
 
@@ -146,7 +155,8 @@ kỳ để có ví dụ *Sắp hết / Hết hàng*.
 | `category` | Danh mục |
 | `unit` | Đơn vị tính (kg, g, lít, ml, gói, chai, hộp, ...) |
 | `price` | Đơn giá tham khảo (đ / đơn vị) |
-| `min_stock` | Mức tồn tối thiểu (để cảnh báo) |
+| `min_stock` | Mức tồn tối thiểu = lượng dự trữ phải giữ (để cảnh báo) |
+| `shelf_life_days` | Hạn sử dụng (ngày, tính từ ngày nhập). ≥ 90 ngày: *Để lâu được*; ngắn hơn: *Mau hỏng* |
 | `note` | Ghi chú |
 
 **`transactions.csv`**
@@ -155,7 +165,7 @@ kỳ để có ví dụ *Sắp hết / Hết hàng*.
 |-----|---------|
 | `date` | Ngày (YYYY-MM-DD) |
 | `product` | Tên sản phẩm (khớp `products.csv`) |
-| `type` | `in` = nhập kho, `out` = xuất kho |
+| `type` | `in` = nhập kho, `out` = xuất kho, `dispose` = hủy hàng (hết hạn / hư hỏng) |
 | `quantity` | Số lượng (theo đơn vị của sản phẩm) |
 | `unit_price` | Đơn giá của giao dịch |
 | `note` | Ghi chú |
@@ -166,13 +176,43 @@ kỳ để có ví dụ *Sắp hết / Hết hàng*.
 
 | Chỉ số | Công thức |
 |--------|-----------|
-| Tồn kho | Tổng nhập − Tổng xuất |
+| Tồn kho | Tổng nhập − Tổng xuất − Tổng hủy |
 | Giá trị tồn | Tồn kho × Đơn giá |
 | Xuất 30 ngày | Tổng xuất trong 30 ngày tính đến giao dịch gần nhất |
 | Đủ dùng (ngày) | Tồn kho ÷ (Xuất 30 ngày ÷ 30) |
 | Trạng thái | Hết hàng nếu tồn ≤ 0 · Sắp hết nếu tồn ≤ mức tối thiểu · còn lại Đủ hàng |
 
+| Cận hạn | Lô hàng còn ≤ 20% hạn dùng (tối thiểu 2, tối đa 30 ngày) |
+
 Chi tiết trong [`src/inventory.py`](src/inventory.py) và [`src/catalog.py`](src/catalog.py).
+
+### KPI đánh giá quy trình quản lý kho (theo quý)
+
+**1. Đối tượng:** quy trình quản lý kho nhu yếu phẩm (qua đó đánh giá người phụ trách kho).
+**2. Tiêu chí → Chỉ số → Tiêu chuẩn:**
+
+| Tiêu chí | Chỉ số | Công thức | Tiêu chuẩn (Đạt · Cảnh báo) | Trọng số |
+|----------|--------|-----------|-----------------------------|----------|
+| Bảo đảm dự trữ | Tỷ lệ ngày còn hàng | (ngày × mặt hàng) tồn > 0 ÷ tổng | ≥ 98% · ≥ 95% | 20% |
+| | Tỷ lệ đạt mức dự trữ | (ngày × mặt hàng) tồn > mức tối thiểu ÷ tổng | ≥ 90% · ≥ 80% | 15% |
+| | Số lần hết hàng | số lần chuyển từ còn hàng sang hết hàng | ≤ 2 · ≤ 5 | 10% |
+| Chất lượng bảo quản | Tỷ lệ hao hụt do hết hạn | giá trị hủy ÷ giá trị nhập | ≤ 1% · ≤ 3% | 15% |
+| | Tỷ lệ hàng cận hạn cuối quý | giá trị lô cận hạn ÷ giá trị tồn | ≤ 5% · ≤ 10% | 10% |
+| Hiệu suất sử dụng vốn | Vòng quay tồn kho (quy năm) | giá trị xuất ÷ tồn bình quân × 365 ÷ số ngày | ≥ 24 · ≥ 15 | 10% |
+| | Tỷ lệ hàng tồn đọng | giá trị hàng cần > 60 ngày mới bán hết ÷ giá trị tồn | ≤ 10% · ≤ 20% | 10% |
+| Tuân thủ quy trình | Tỷ lệ nhập hàng kịp thời | lần chạm mức dự trữ có phiếu nhập trong ≤ 2 ngày ÷ tổng | ≥ 90% · ≥ 75% | 10% |
+
+**3. Dữ liệu:** phiếu nhập / xuất / hủy và danh mục sản phẩm (đơn giá, mức dự trữ, hạn dùng).
+
+**Điểm tổng hợp** = Σ trọng số × hệ số (Đạt 100% · Cảnh báo 60% · Chưa đạt 20%).
+**Xếp loại:** A ≥ 85 (Tốt) · B ≥ 70 (Khá) · C ≥ 50 (Trung bình) · D < 50 (Cần cải thiện).
+Đổi tiêu chuẩn / trọng số / biện pháp cải tiến → sửa `KPI_DEFS` và `ACTIONS` trong [`src/kpi.py`](src/kpi.py).
+
+### Quản lý rủi ro
+
+Mức rủi ro = **khả năng xảy ra (1–5) × mức ảnh hưởng (1–5)**: ≥ 15 *Cao* (xử lý trong ngày),
+8–14 *Trung bình* (trong tuần), < 8 *Thấp* (theo dõi). Loại rủi ro và biện pháp nằm trong
+[`src/risk.py`](src/risk.py).
 
 > **Lưu ý:** tồn kho **không lưu cố định** mà luôn tính lại từ lịch sử giao dịch,
 > nên số liệu luôn khớp với sổ nhập / xuất.

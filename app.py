@@ -19,10 +19,10 @@ import streamlit as st
 
 from src import auth
 from src import database as db
-from src import inventory
+from src import inventory, kpi, risk
 from src.catalog import (
-    IN_STOCK, LOW_STOCK, OUT_OF_STOCK, STATUSES, TX_IN, TX_LABEL, TX_OUT,
-    UNCATEGORIZED, UNITS, fmt_money, fmt_qty,
+    IN_STOCK, LONG_LIFE, LONG_LIFE_DAYS, LOW_STOCK, OUT_OF_STOCK, SHORT_LIFE, STATUSES, TX_DISPOSE,
+    TX_IN, TX_LABEL, TX_OUT, UNCATEGORIZED, UNITS, fmt_money, fmt_qty, storage_class,
 )
 
 # ---------------------------------------------------------------------------
@@ -88,6 +88,12 @@ CSS = """
 .sk-tag { flex: none; width: 52px; padding: 3px 0; border-radius: 6px; font-size: 12px; font-weight: 600; text-align: center; }
 .sk-tag.in { background: #E4F0E8; color: #14532D; }
 .sk-tag.out { background: #E7ECE9; color: #12211C; }
+.sk-tag.dispose { background: #FBE3DF; color: #7F1D13; }
+.sk-pill.neutral { background: #F3F5F4; color: #12211C; border-color: #B9C4BE; }
+.sk-stat .sk-sub { margin-top: 2px; }
+.sk-stat.out .sk-sub { color: #FBE3DF; }
+.sk-stat.low .sk-sub { color: #6B3A05; }
+.sk-table td[rowspan] { background: #F8FAF9; vertical-align: top; }
 .sk-list .g { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .sk-list .g span { font-size: 13px; color: #4B5B54; }
 [class*="st-key-card"] { background: #FFFFFF; }
@@ -217,7 +223,11 @@ products = db.products_df(conn)
 tx = db.transactions_df(conn)
 stock = inventory.stock_table(products, tx)
 stock["category"] = stock["category"].fillna(UNCATEGORIZED)
+stock["storage"] = stock["shelf_life_days"].map(storage_class)
 tx["category"] = tx["category"].fillna(UNCATEGORIZED)
+LOTS_NOW = inventory.lots_at(products, tx, tx["date"].max()) if not tx.empty else pd.DataFrame(
+    columns=["product_id", "days_left", "near", "expired", "qty"])
+NEAREST = LOTS_NOW.groupby("product_id")["days_left"].min()
 AS_OF = f"{tx['date'].max():%d/%m/%Y}" if not tx.empty else "–"
 
 
@@ -247,6 +257,16 @@ def days_text(r) -> str:
     if r["quantity"] <= 0 or d is None or (isinstance(d, float) and math.isnan(d)):
         return "–"
     return f"{int(d)} ngày"
+
+
+def expiry_note(pid: int) -> str:
+    """Ghi chú lô gần hết hạn nhất của một mặt hàng (đang còn trong kho)."""
+    if pid not in NEAREST.index:
+        return ""
+    left = int(NEAREST[pid])
+    if left < 0:
+        return f' · <b style="color:#9B1C1C">có lô quá hạn</b>'
+    return f" · lô gần nhất còn {left} ngày"
 
 
 def plot_layout(fig: go.Figure, title: str, height: int = 340, **kw) -> go.Figure:
@@ -305,7 +325,12 @@ def page_stock() -> None:
         sel = st.pills("Lọc theo danh mục", options, default="Tất cả", label_visibility="collapsed",
                        format_func=lambda c: f"{c} · {len(stock) if c == 'Tất cả' else cat_count[c]}")
 
+        life = st.segmented_control(
+            "Nhóm bảo quản", ["Tất cả", LONG_LIFE, SHORT_LIFE], default="Tất cả",
+            help=f"Để lâu được: hạn dùng ≥ {LONG_LIFE_DAYS} ngày. Mau hỏng: hạn dùng ngắn hơn, phải bán nhanh.")
         view = stock if sel in (None, "Tất cả") else stock[stock["category"] == sel]
+        if life not in (None, "Tất cả"):
+            view = view[view["storage"] == life]
         if keyword.strip():
             view = view[view["name"].str.contains(keyword.strip(), case=False, regex=False)]
         head.markdown(f"#### Tất cả mặt hàng <span style='font-weight:400;color:{MUTED}'>({len(view)})</span>",
@@ -319,6 +344,8 @@ def page_stock() -> None:
             u = escape(r["unit"])
             rows.append(
                 f'<tr><td><b>{escape(r["name"])}</b></td><td class="m">{escape(r["category"])}</td>'
+                f'<td><span class="sk-pill neutral">{escape(r["storage"])}</span><br>'
+                f'<span class="sk-sub">hạn {int(r["shelf_life_days"])} ngày{expiry_note(r["id"])}</span></td>'
                 f'<td><div class="sk-meter"><div class="top"><b>{fmt_qty(r["quantity"])} {u}</b>'
                 f'<span class="sk-sub">tối thiểu {fmt_qty(mn)} {u}</span></div>'
                 f'<div class="sk-bar"><i style="width:{bar:.1f}%;background:{STATUS_BAR[r["status"]]}"></i></div></div></td>'
@@ -328,14 +355,14 @@ def page_stock() -> None:
         empty = "" if rows else '<p class="sk-empty">Không có mặt hàng nào khớp. Thử xóa từ khóa hoặc chọn “Tất cả”.</p>'
         st.html(f"""
 <div class="sk-wrap"><table class="sk-table">
-<thead><tr><th>Sản phẩm</th><th>Danh mục</th><th>Tồn kho so với mức tối thiểu</th>
+<thead><tr><th>Sản phẩm</th><th>Danh mục</th><th>Bảo quản</th><th>Tồn kho so với mức tối thiểu</th>
 <th class="r">Đơn giá</th><th class="r">Giá trị tồn</th><th class="r">Đủ dùng</th><th>Trạng thái</th></tr></thead>
 <tbody>{body}</tbody></table>{empty}</div>
 <p class="sk-note">Vạch đen trên thanh là mức tồn tối thiểu. “Đủ dùng” = tồn kho chia cho lượng xuất
 bình quân mỗi ngày trong {inventory.WINDOW_DAYS} ngày gần nhất.</p>""")
 
-        export = view[["name", "category", "unit", "quantity", "min_stock", "price",
-                       "value", "out_window", "days_cover", "status"]]
+        export = view[["name", "category", "storage", "shelf_life_days", "unit", "quantity", "min_stock",
+                       "price", "value", "out_window", "days_cover", "status"]]
         st.download_button("Tải bảng tồn kho (CSV)", export.to_csv(index=False).encode("utf-8-sig"),
                            file_name="ton_kho.csv", mime="text/csv", icon=":material/download:")
 
@@ -354,7 +381,7 @@ def page_tx() -> None:
             st.info("Chưa có sản phẩm. Hãy thêm ở trang **Sản phẩm & danh mục**.")
             return
         by_id = stock.sort_values("name").set_index("id")
-        tx_type = st.segmented_control("Loại phiếu", [TX_IN, TX_OUT], default=TX_OUT,
+        tx_type = st.segmented_control("Loại phiếu", [TX_IN, TX_OUT, TX_DISPOSE], default=TX_OUT,
                                        format_func=TX_LABEL.get, label_visibility="collapsed",
                                        width="stretch") or TX_OUT
         pid = st.selectbox("Sản phẩm", by_id.index.tolist(),
@@ -372,7 +399,9 @@ def page_tx() -> None:
         tx_date = a.date_input("Ngày", value=dt.date.today(), format="DD/MM/YYYY")
         note = b.text_input("Ghi chú", placeholder="Ví dụ: bán lẻ, nhập từ NCC A")
 
-        is_out = tx_type == TX_OUT
+        if tx_type == TX_DISPOSE:
+            st.caption("Hủy hàng: ghi hàng hết hạn / hư hỏng phải bỏ. Được tính vào KPI hao hụt.")
+        is_out = tx_type in (TX_OUT, TX_DISPOSE)
         over = is_out and qty > stock_qty
         after = stock_qty - qty if is_out else stock_qty + qty
         after_txt = "Không đủ" if over else f"{fmt_qty(after)} {escape(unit)}"
@@ -383,7 +412,8 @@ def page_tx() -> None:
 <div><dt>Thành tiền</dt><dd>{fmt_money(qty * price)}</dd></div>
 </dl>""")
         if over:
-            st.error(f"Không đủ hàng để xuất: kho chỉ còn {fmt_qty(stock_qty)} {unit}.")
+            st.error(f"Không đủ hàng để {'hủy' if tx_type == TX_DISPOSE else 'xuất'}: "
+                     f"kho chỉ còn {fmt_qty(stock_qty)} {unit}.")
         if st.button("Ghi nhận phiếu", type="primary", width="stretch", disabled=over or qty <= 0):
             try:
                 db.add_transaction(conn, int(pid), tx_type, qty, price, tx_date, note)
@@ -400,7 +430,7 @@ def page_tx() -> None:
         items = []
         for _, t in tx.head(12).iterrows():
             items.append(
-                f'<li><span class="sk-tag {t["type"]}">{"Nhập" if t["type"] == TX_IN else "Xuất"}</span>'
+                f'<li><span class="sk-tag {t["type"]}">{ {TX_IN: "Nhập", TX_OUT: "Xuất"}.get(t["type"], "Hủy") }</span>'
                 f'<div class="g"><b>{escape(t["product"])}</b><span>{t["date"]:%d/%m/%Y} · '
                 f'{fmt_qty(t["quantity"])} {escape(t["unit"])}</span></div>'
                 f'<b style="white-space:nowrap">{fmt_money(t["quantity"] * t["unit_price"])}</b></li>')
@@ -431,15 +461,19 @@ def page_products() -> None:
                 a, b = st.columns(2)
                 cid = a.selectbox("Danh mục", cat_options, format_func=cat_label)
                 unit = b.selectbox("Đơn vị tính", UNITS)
-                a, b, c = st.columns(3)
+                a, b, c, d = st.columns(4)
                 price = a.number_input("Đơn giá (đ)", min_value=0.0, format="%g", step=1000.0)
-                min_stock = b.number_input("Tồn tối thiểu", min_value=0.0, format="%g", step=1.0)
-                opening = c.number_input("Tồn đầu kỳ", min_value=0.0, format="%g", step=1.0,
+                min_stock = b.number_input("Tồn tối thiểu", min_value=0.0, format="%g", step=1.0,
+                                           help="Lượng dự trữ phải luôn giữ trong kho.")
+                shelf = c.number_input("Hạn sử dụng (ngày)", min_value=1, value=365, step=1,
+                                       help=f"≥ {LONG_LIFE_DAYS} ngày: để lâu được; ngắn hơn: mau hỏng.")
+                opening = d.number_input("Tồn đầu kỳ", min_value=0.0, format="%g", step=1.0,
                                          help="Ghi thành một phiếu nhập.")
                 note = st.text_input("Ghi chú")
                 if st.form_submit_button("Thêm sản phẩm", type="primary", icon=":material/add:"):
                     try:
-                        db.add_product(conn, name, cid, unit, price, min_stock, note, opening)
+                        db.add_product(conn, name, cid, unit, price, min_stock, note, opening,
+                                       shelf_life_days=int(shelf))
                         notify(f"Đã thêm sản phẩm “{name.strip()}”.")
                         st.rerun()
                     except ValueError as e:
@@ -462,16 +496,20 @@ def page_products() -> None:
                                       index=cat_options.index(cur_cid))
                     unit = b.selectbox("Đơn vị tính", UNITS,
                                        index=UNITS.index(e["unit"]) if e["unit"] in UNITS else 0)
-                    a, b = st.columns(2)
+                    a, b, c = st.columns(3)
                     price = a.number_input("Đơn giá (đ)", min_value=0.0, format="%g", step=1000.0,
                                            value=float(e["price"]))
                     min_stock = b.number_input("Tồn tối thiểu", min_value=0.0, format="%g", step=1.0,
                                                value=float(e["min_stock"]))
+                    shelf = c.number_input("Hạn sử dụng (ngày)", min_value=1, step=1,
+                                           value=int(e["shelf_life_days"]),
+                                           help=f"≥ {LONG_LIFE_DAYS} ngày: để lâu được; ngắn hơn: mau hỏng.")
                     note = st.text_input("Ghi chú", value=e["note"] or "")
                     st.caption("Số lượng tồn kho không sửa ở đây: hãy ghi phiếu nhập / xuất để sổ luôn khớp.")
                     if st.form_submit_button("Lưu thay đổi", type="primary"):
                         try:
-                            db.update_product(conn, int(eid), name, cid, unit, price, min_stock, note)
+                            db.update_product(conn, int(eid), name, cid, unit, price, min_stock, note,
+                                              shelf_life_days=int(shelf))
                             notify(f"Đã cập nhật “{name.strip()}”.")
                             st.rerun()
                         except ValueError as err:
@@ -535,13 +573,18 @@ def page_report() -> None:
         st.plotly_chart(plot_layout(fig, "Trạng thái theo danh mục", barmode="stack",
                                     xaxis_title="số mặt hàng"), width="stretch")
 
-    flow = inventory.monthly_flow(tx)
-    labels = [f"Tháng {int(m[5:])}/{m[:4]}" for m in flow["month"]]
     with a, st.container(border=True, key="card9"):
+        per = st.segmented_control("Kỳ", ["Theo tháng", "Theo quý"], default="Theo tháng",
+                                   label_visibility="collapsed") or "Theo tháng"
+        quarterly = per == "Theo quý"
+        flow = inventory.monthly_flow(tx, "Q" if quarterly else "M")
+        labels = ([f"Q{m[-1]}/{m[:4]}" for m in flow["month"]] if quarterly
+                  else [f"T{int(m[5:])}/{m[:4]}" for m in flow["month"]])
         fig = go.Figure()
         fig.add_bar(x=labels, y=flow["Nhập kho"], name="Nhập kho", marker_color=ACCENT)
         fig.add_bar(x=labels, y=flow["Xuất kho"], name="Xuất kho", marker_color=OUT_COLOR)
-        st.plotly_chart(plot_layout(fig, "Giá trị nhập / xuất theo tháng", barmode="group",
+        fig.add_bar(x=labels, y=flow["Hủy hàng"], name="Hủy hàng", marker_color="#7F1D13")
+        st.plotly_chart(plot_layout(fig, f"Giá trị nhập / xuất / hủy {per.lower()}", barmode="group",
                                     yaxis_title="đ"), width="stretch")
 
     top = inventory.top_consumed(stock).iloc[::-1]
@@ -553,6 +596,24 @@ def page_report() -> None:
             textposition="auto"))
         st.plotly_chart(plot_layout(fig, f"Xuất nhiều nhất trong {inventory.WINDOW_DAYS} ngày (theo giá trị)",
                                     xaxis_title="đ"), width="stretch")
+
+    with a, st.container(border=True, key="card_storage"):
+        g = stock.groupby("storage").agg(value=("value", "sum"), n=("id", "count")).reindex([LONG_LIFE, SHORT_LIFE]).fillna(0)
+        fig = go.Figure(go.Pie(labels=list(g.index), values=g["value"], hole=0.55,
+                               marker=dict(colors=[ACCENT, OUT_COLOR]),
+                               text=[f"{int(n)} mặt hàng" for n in g["n"]], textinfo="label+percent"))
+        st.plotly_chart(plot_layout(fig, "Giá trị tồn theo nhóm bảo quản", showlegend=False), width="stretch")
+    with b, st.container(border=True, key="card_disposal"):
+        d = tx[tx["type"] == TX_DISPOSE]
+        d = d.assign(v=d["quantity"] * d["unit_price"],
+                     q="Q" + d["date"].dt.quarter.astype(str) + "/" + d["date"].dt.year.astype(str))
+        pv = d.pivot_table(index="q", columns="product", values="v", aggfunc="sum", fill_value=0)
+        fig = go.Figure()
+        for i, col in enumerate(pv.columns):
+            fig.add_bar(x=list(pv.index), y=pv[col], name=col,
+                        marker_color=["#7F1D13", "#B45309", "#1D4ED8", "#2F7D53", "#6B21A8"][i % 5])
+        st.plotly_chart(plot_layout(fig, "Giá trị hàng hủy (hết hạn) theo quý", barmode="stack",
+                                    yaxis_title="đ"), width="stretch")
 
 
 # ===========================================================================
@@ -566,7 +627,7 @@ def page_history() -> None:
     with st.container(border=True, key="card11"):
         a, b, c, d = st.columns([2, 1, 1, 2])
         q = a.text_input("Sản phẩm", placeholder="Tìm theo tên")
-        types = b.selectbox("Loại", ["", TX_IN, TX_OUT],
+        types = b.selectbox("Loại", ["", TX_IN, TX_OUT, TX_DISPOSE],
                             format_func=lambda t: "Tất cả" if not t else TX_LABEL[t])
         cat = c.selectbox("Danh mục", [""] + sorted(tx["category"].unique()),
                           format_func=lambda x: x or "Tất cả")
@@ -689,6 +750,296 @@ def page_account() -> None:
                 st.error(str(e))
 
 
+# ===========================================================================
+# PHẦN DÙNG CHUNG CHO BÁO CÁO / KPI / RỦI RO
+# ===========================================================================
+KPI_CLS = {kpi.GOOD: "ok", kpi.WARN: "low", kpi.BAD: "out"}
+RISK_CLS = {risk.HIGH: "out", risk.MEDIUM: "low", risk.LOW: "neutral"}
+PRIORITY_CLS = {"Cao": "out", "Trung bình": "low", "Theo dõi": "neutral"}
+GRADE_COLOR = {"A": "#2F7D53", "B": "#1D4ED8", "C": "#B45309", "D": "#7F1D13"}
+
+
+@st.cache_data(show_spinner="Đang tính KPI theo quý...")
+def cached_quarterly(products_: pd.DataFrame, tx_: pd.DataFrame) -> pd.DataFrame:
+    return kpi.quarterly_table(products_, tx_)
+
+
+@st.cache_data(show_spinner=False)
+def cached_daily(products_: pd.DataFrame, tx_: pd.DataFrame) -> pd.DataFrame:
+    return inventory.daily_stock(products_, tx_)
+
+
+def tag(text: str, cls: str) -> str:
+    return f'<span class="sk-pill {cls}">{escape(text)}</span>'
+
+
+def stat_cards(items: list[tuple]) -> None:
+    """items: (nhãn, giá trị, lớp màu '' | 'low' | 'out', ghi chú nhỏ)."""
+    html = "".join(
+        f'<div class="sk-stat {cls}"><span class="l">{escape(label)}</span>'
+        f'<span class="v">{value}</span>{f"<span class=sk-sub>{note}</span>" if note else ""}</div>'
+        for label, value, cls, note in items)
+    st.html(f'<section class="sk-stats">{html}</section>')
+
+
+def html_table(head: list[str], rows: list[str], right: set[int] = frozenset(), empty: str = "Không có dữ liệu.") -> None:
+    th = "".join(f'<th class="{"r" if i in right else ""}">{h}</th>' for i, h in enumerate(head))
+    body = "".join(rows)
+    tail = "" if rows else f'<p class="sk-empty">{escape(empty)}</p>'
+    st.html(f'<div class="sk-wrap"><table class="sk-table"><thead><tr>{th}</tr></thead>'
+            f'<tbody>{body}</tbody></table>{tail}</div>')
+
+
+# ===========================================================================
+# TRANG – BÁO CÁO CUỐI NGÀY
+# ===========================================================================
+def page_daily() -> None:
+    if tx.empty:
+        page_head("Báo cáo cuối ngày", "Chưa có giao dịch.")
+        return
+    last = tx["date"].max().date()
+    top_l, top_r = st.columns([2, 1], vertical_alignment="bottom")
+    day = top_r.date_input("Ngày báo cáo", value=last, min_value=tx["date"].min().date(),
+                           max_value=max(last, dt.date.today()), format="DD/MM/YYYY")
+    with top_l:
+        page_head("Báo cáo cuối ngày", f"Nhập – xuất – hủy – tồn cuối ngày {day:%d/%m/%Y}, "
+                                      "kèm hàng cận hạn và hàng dưới mức dự trữ.")
+    rep = inventory.daily_report(products, tx, pd.Timestamp(day))
+    rep["category"] = rep["category"].fillna(UNCATEGORIZED)
+    in_val = float((rep["in"] * rep["price"]).sum())
+    disp_val = float((rep["dispose"] * rep["price"]).sum())
+    near = rep[rep["near_qty"] > 0]
+    under = rep[rep["status"] != IN_STOCK]
+    stat_cards([
+        ("Giá trị xuất bán trong ngày", fmt_money(rep["sales_value"].sum()), "", None),
+        ("Giá trị nhập trong ngày", fmt_money(in_val), "", None),
+        ("Hàng hủy trong ngày", fmt_money(disp_val), "out" if disp_val > 0 else "", None),
+        ("Tồn cuối ngày", fmt_money(rep["value"].sum()), "", None),
+        ("Dưới mức dự trữ", f"{len(under)} <small>mặt hàng</small>", "low" if len(under) else "", None),
+        ("Có lô cận hạn", f"{len(near)} <small>mặt hàng</small>", "low" if len(near) else "", None),
+    ])
+
+    with st.container(border=True, key="card_daily"):
+        only = st.segmented_control("Hiển thị", ["Tất cả", "Có phát sinh", "Cần chú ý"], default="Tất cả",
+                                    label_visibility="collapsed") or "Tất cả"
+        view = rep
+        if only == "Có phát sinh":
+            view = rep[(rep["in"] + rep["out"] + rep["dispose"]) > 0]
+        elif only == "Cần chú ý":
+            view = rep[(rep["status"] != IN_STOCK) | (rep["near_qty"] > 0)]
+        rows = []
+        for _, r in view.sort_values(["category", "name"]).iterrows():
+            u = escape(r["unit"])
+            left = "–" if pd.isna(r["days_left"]) else f"{int(r['days_left'])} ngày"
+            near_txt = f'<br><span class="sk-sub">cận hạn {fmt_qty(r["near_qty"])} {u}</span>' if r["near_qty"] > 0 else ""
+            rows.append(
+                f'<tr><td><b>{escape(r["name"])}</b><br><span class="sk-sub">{escape(r["category"])}</span></td>'
+                f'<td>{tag(storage_class(r["shelf_life_days"]), "neutral")}</td>'
+                f'<td class="r">{fmt_qty(r["opening"])} {u}</td><td class="r">{fmt_qty(r["in"])}</td>'
+                f'<td class="r">{fmt_qty(r["out"])}</td><td class="r">{fmt_qty(r["dispose"])}</td>'
+                f'<td class="r"><b>{fmt_qty(r["closing"])} {u}</b></td>'
+                f'<td class="r">{left}{near_txt}</td><td>{pill(r["status"])}</td></tr>')
+        html_table(["Sản phẩm", "Bảo quản", "Tồn đầu ngày", "Nhập", "Xuất", "Hủy", "Tồn cuối ngày",
+                    "Lô gần hết hạn", "Trạng thái"], rows, right={2, 3, 4, 5, 6, 7},
+                   empty="Không có mặt hàng nào khớp.")
+        export = view[["name", "category", "unit", "shelf_life_days", "opening", "in", "out", "dispose",
+                       "closing", "value", "near_qty", "days_left", "status"]]
+        st.download_button("Tải báo cáo ngày (CSV)", export.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"bao_cao_ngay_{day:%Y%m%d}.csv", mime="text/csv",
+                           icon=":material/download:")
+
+
+# ===========================================================================
+# TRANG – ĐÁNH GIÁ KPI (BÁO CÁO THEO QUÝ)
+# ===========================================================================
+def page_kpi() -> None:
+    q = cached_quarterly(products, tx)
+    if q.empty:
+        page_head("Đánh giá KPI", "Chưa có dữ liệu.")
+        return
+    periods = list(q.index)
+    top_l, top_r = st.columns([2, 1], vertical_alignment="bottom")
+    sel = top_r.selectbox("Quý đánh giá", periods, index=len(periods) - 1)
+    with top_l:
+        page_head("Đánh giá KPI theo quý", f"Đối tượng: {kpi.OBJECT}")
+    i = periods.index(sel)
+    row, prev = q.loc[sel], (q.iloc[i - 1] if i > 0 else None)
+    letter, text = kpi.grade(row["score"])
+    statuses = {k: kpi.evaluate(k, row[k]) for k in kpi.KPI_DEFS}
+    n = {s: sum(v == s for v in statuses.values()) for s in (kpi.GOOD, kpi.WARN, kpi.BAD)}
+    if prev is not None:
+        d = row["score"] - prev["score"]
+        trend = (f"{'Tăng' if d > 0 else 'Giảm' if d < 0 else 'Giữ nguyên'} "
+                 f"{abs(d):.0f} điểm so với {periods[i - 1]}")
+    else:
+        trend = "Quý đầu tiên có dữ liệu"
+    stat_cards([
+        ("Điểm tổng hợp", f"{row['score']:.0f} <small>/ 100</small>", "", trend),
+        ("Xếp loại người phụ trách kho", f'<span style="color:{GRADE_COLOR[letter]}">{letter}</span> '
+                                        f"<small>{text}</small>", "", "A ≥ 85 · B ≥ 70 · C ≥ 50 · D < 50"),
+        ("Chỉ số đạt", f"{n[kpi.GOOD]} <small>/ {len(statuses)}</small>", "", None),
+        ("Cảnh báo / chưa đạt", f"{n[kpi.WARN]} <small>cảnh báo</small> · {n[kpi.BAD]} <small>chưa đạt</small>",
+         "out" if n[kpi.BAD] else "low" if n[kpi.WARN] else "", None),
+    ])
+
+    # --- Bảng KPI: Tiêu chí → Chỉ số → Kết quả / Tiêu chuẩn / Đánh giá / Cải thiện
+    with st.container(border=True, key="card_kpi_table"):
+        st.markdown(f"#### Kết quả {sel}")
+        rows = []
+        for group in kpi.CRITERIA:
+            keys = [k for k, d in kpi.KPI_DEFS.items() if d["group"] == group]
+            for j, k in enumerate(keys):
+                d = kpi.KPI_DEFS[k]
+                change = "–"
+                if prev is not None:
+                    delta = row[k] - prev[k]
+                    better = delta > 1e-9 if d["higher"] else delta < -1e-9
+                    worse = delta < -1e-9 if d["higher"] else delta > 1e-9
+                    sign = "+" if delta > 0 else ""
+                    val = (f"{sign}{delta:.1f}" if d["fmt"] != "int" else f"{sign}{delta:.0f}").replace(".", ",")
+                    change = (tag(f"▲ {val} cải thiện", "ok") if better else
+                              tag(f"▼ {val} xấu đi", "out") if worse else tag("không đổi", "neutral"))
+                crit = f'<td rowspan="{len(keys)}"><b>{escape(group)}</b></td>' if j == 0 else ""
+                rows.append(
+                    f'<tr>{crit}<td>{escape(d["label"])}<br><span class="sk-sub">trọng số {d["weight"]}%</span></td>'
+                    f'<td class="r"><b>{kpi.fmt_value(k, row[k])}</b></td>'
+                    f'<td><span class="sk-sub">{escape(kpi.standard_text(k))}</span></td>'
+                    f'<td>{tag(statuses[k], KPI_CLS[statuses[k]])}</td><td>{change}</td></tr>')
+        html_table(["Tiêu chí", "Chỉ số (Index)", "Kết quả", "Tiêu chuẩn", "Đánh giá", "So với quý trước"],
+                   rows, right={2})
+        st.caption("Điểm tổng hợp = Σ trọng số × hệ số (Đạt 100% · Cảnh báo 60% · Chưa đạt 20%).")
+
+    with st.expander("Khung đánh giá: đối tượng, tiêu chí, công thức và dữ liệu", icon=":material/rule:"):
+        st.markdown(f"**1. Đối tượng:** {kpi.OBJECT}.  \n**2. Tiêu chí → Chỉ số → Tiêu chuẩn** như bảng dưới.  \n"
+                    "**3. Dữ liệu:** lịch sử phiếu nhập / xuất / hủy hàng, danh mục sản phẩm "
+                    "(đơn giá, mức dự trữ tối thiểu, hạn sử dụng).")
+        rows = [f'<tr><td>{escape(d["group"])}</td><td><b>{escape(d["label"])}</b></td>'
+                f'<td>{escape(d["formula"])}</td><td>{escape(kpi.standard_text(k))}</td>'
+                f'<td class="r">{d["weight"]}%</td><td><span class="sk-sub">{escape(d["data"])}</span></td></tr>'
+                for k, d in kpi.KPI_DEFS.items()]
+        html_table(["Tiêu chí", "Chỉ số", "Công thức", "Tiêu chuẩn", "Trọng số", "Nguồn dữ liệu"], rows, right={4})
+
+    # --- Biểu đồ
+    a, b = st.columns(2)
+    with a, st.container(border=True, key="card_kpi_score"):
+        colors = [GRADE_COLOR[g] for g in q["grade"]]
+        fig = go.Figure(go.Bar(x=list(q.index), y=q["score"], marker_color=colors,
+                               text=[f"{s:.0f} · {g}" for s, g in zip(q["score"], q["grade"])],
+                               textposition="inside", insidetextanchor="end", textfont=dict(color="#FFFFFF")))
+        fig.add_hline(y=85, line_dash="dash", line_color="#2F7D53", annotation_text="Loại A (85)",
+                      annotation_position="top left")
+        fig.add_hline(y=70, line_dash="dot", line_color="#B45309", annotation_text="Loại B (70)",
+                      annotation_position="bottom left")
+        fig.update_yaxes(range=[0, 105])
+        st.plotly_chart(plot_layout(fig, "Điểm tổng hợp & xếp loại qua các quý", yaxis_title="điểm"),
+                        width="stretch")
+    with b, st.container(border=True, key="card_kpi_trend"):
+        key = st.selectbox("Chỉ số", list(kpi.KPI_DEFS), format_func=lambda k: kpi.KPI_DEFS[k]["label"],
+                           key="kpi_trend_key")
+        d = kpi.KPI_DEFS[key]
+        fig = go.Figure(go.Bar(
+            x=list(q.index), y=q[key],
+            marker_color=[STATUS_BAR[{kpi.GOOD: IN_STOCK, kpi.WARN: LOW_STOCK, kpi.BAD: OUT_OF_STOCK}[kpi.evaluate(key, v)]]
+                          for v in q[key]],
+            text=[kpi.fmt_value(key, v) for v in q[key]], textposition="inside", insidetextanchor="end",
+            textfont=dict(color="#FFFFFF")))
+        fig.add_hline(y=d["target"], line_dash="dash", line_color="#2F7D53",
+                      annotation_text=f"Mục tiêu {kpi.fmt_value(key, d['target'])}",
+                      annotation_position="top left")
+        fig.add_hline(y=d["warn"], line_dash="dot", line_color="#B45309",
+                      annotation_text=f"Cảnh báo {kpi.fmt_value(key, d['warn'])}",
+                      annotation_position="bottom left")
+        st.plotly_chart(plot_layout(fig, f"Xu hướng: {d['label']}", yaxis_title=d["unit"]), width="stretch")
+
+    # --- Phương án cải tiến
+    with st.container(border=True, key="card_kpi_plan"):
+        st.markdown(f"#### Phương án cải tiến cho {sel}")
+        plans = kpi.improvement_plan(products, tx, row, prev, cached_daily(products, tx))
+        if not plans:
+            st.success("Tất cả chỉ số đều đạt và không xấu đi so với quý trước. Duy trì quy trình hiện tại.")
+        rows = []
+        for p in plans:
+            items = ", ".join(p["items"]) if p["items"] else "–"
+            rows.append(
+                f'<tr><td>{tag(p["priority"], PRIORITY_CLS[p["priority"]])}</td>'
+                f'<td><b>{escape(p["label"])}</b><br><span class="sk-sub">{escape(p["group"])} · '
+                f'kết quả {escape(p["value"])} ({escape(p["status"])})</span></td>'
+                f'<td>{escape(items)}</td><td>{escape(p["action"])}</td></tr>')
+        if rows:
+            html_table(["Ưu tiên", "Chỉ số cần cải thiện", "Mặt hàng ảnh hưởng nhiều nhất", "Biện pháp"], rows)
+
+    export = q.drop(columns=["start", "end"]).rename(columns={k: d["label"] for k, d in kpi.KPI_DEFS.items()})
+    st.download_button("Tải báo cáo KPI theo quý (CSV)", export.to_csv().encode("utf-8-sig"),
+                       file_name="kpi_theo_quy.csv", mime="text/csv", icon=":material/download:")
+
+
+# ===========================================================================
+# TRANG – QUẢN LÝ RỦI RO
+# ===========================================================================
+def page_risk() -> None:
+    if tx.empty:
+        page_head("Quản lý rủi ro", "Chưa có giao dịch.")
+        return
+    last = tx["date"].max().date()
+    top_l, top_r = st.columns([2, 1], vertical_alignment="bottom")
+    day = top_r.date_input("Đánh giá tại ngày", value=last, min_value=tx["date"].min().date(),
+                           max_value=max(last, dt.date.today()), format="DD/MM/YYYY", key="risk_day")
+    with top_l:
+        page_head("Quản lý rủi ro tồn kho", "Nhận diện → đánh giá (khả năng × ảnh hưởng) → biện pháp xử lý.")
+    reg = risk.register(products, tx, pd.Timestamp(day))
+    n = {lv: int((reg["level"] == lv).sum()) if not reg.empty else 0 for lv in risk.LEVELS}
+    stat_cards([
+        ("Rủi ro cao", f"{n[risk.HIGH]} <small>mục</small>", "out" if n[risk.HIGH] else "", "xử lý ngay trong ngày"),
+        ("Rủi ro trung bình", f"{n[risk.MEDIUM]} <small>mục</small>", "low" if n[risk.MEDIUM] else "", "xử lý trong tuần"),
+        ("Rủi ro thấp", f"{n[risk.LOW]} <small>mục</small>", "", "theo dõi"),
+        ("Giá trị hàng chịu rủi ro", fmt_money(reg["value"].sum() if not reg.empty else 0), "", "cận hạn, quá hạn, tồn đọng, dưới dự trữ"),
+    ])
+    if reg.empty:
+        st.success("Không phát hiện rủi ro nào tại ngày này.")
+        return
+
+    a, b = st.columns(2)
+    with a, st.container(border=True, key="card_risk_matrix"):
+        grid = [[0] * 5 for _ in range(5)]
+        for _, r in reg.iterrows():
+            grid[int(r["impact"]) - 1][int(r["likelihood"]) - 1] += 1
+        score = [[(li + 1) * (im + 1) for li in range(5)] for im in range(5)]
+        z = [[0 if v < 8 else 1 if v < 15 else 2 for v in r_] for r_ in score]   # 0 thấp · 1 TB · 2 cao
+        text = [[str(grid[im][li]) if grid[im][li] else "" for li in range(5)] for im in range(5)]
+        fig = go.Figure(go.Heatmap(
+            z=z, x=[1, 2, 3, 4, 5], y=[1, 2, 3, 4, 5], text=text, texttemplate="%{text}",
+            customdata=score, textfont=dict(size=18, color="#FFFFFF"), showscale=False, zmin=0, zmax=2,
+            xgap=2, ygap=2,
+            colorscale=[[0, "#7FA393"], [0.33, "#7FA393"], [0.34, "#B45309"], [0.66, "#B45309"],
+                        [0.67, "#7F1D13"], [1, "#7F1D13"]],
+            hovertemplate="Khả năng %{x} × Ảnh hưởng %{y} = %{customdata}<br>Số rủi ro: %{text}<extra></extra>"))
+        fig.update_xaxes(dtick=1)
+        fig.update_yaxes(dtick=1)
+        st.plotly_chart(plot_layout(fig, "Ma trận rủi ro", xaxis_title="Khả năng xảy ra (1–5)",
+                                    yaxis_title="Mức ảnh hưởng (1–5)"), width="stretch")
+        st.caption("Xanh: thấp (< 8) · Cam: trung bình (8–14) · Đỏ: cao (≥ 15). Số trong ô là số rủi ro.")
+    with b, st.container(border=True, key="card_risk_types"):
+        by = reg.groupby(["risk", "level"]).size().unstack(fill_value=0)
+        fig = go.Figure()
+        for lv, color in ((risk.HIGH, "#7F1D13"), (risk.MEDIUM, "#B45309"), (risk.LOW, "#9DB8AA")):
+            if lv in by.columns:
+                fig.add_bar(y=by.index, x=by[lv], name=lv, orientation="h", marker_color=color)
+        st.plotly_chart(plot_layout(fig, "Rủi ro theo loại", barmode="stack", xaxis_title="số mục"),
+                        width="stretch")
+
+    with st.container(border=True, key="card_risk_list"):
+        st.markdown("#### Danh sách rủi ro & biện pháp")
+        rows = [f'<tr><td>{tag(r["level"], RISK_CLS[r["level"]])}<br><span class="sk-sub">điểm {r["score"]}</span></td>'
+                f'<td><b>{escape(r["product"])}</b><br><span class="sk-sub">{escape(r["category"])}</span></td>'
+                f'<td><b>{escape(r["risk"])}</b><br><span class="sk-sub">{escape(r["detail"])}</span></td>'
+                f'<td class="r">{r["likelihood"]} × {r["impact"]}</td><td>{escape(r["action"])}</td></tr>'
+                for _, r in reg.iterrows()]
+        html_table(["Mức", "Sản phẩm", "Rủi ro", "Khả năng × Ảnh hưởng", "Biện pháp"], rows, right={3})
+        st.download_button("Tải danh sách rủi ro (CSV)",
+                           reg.drop(columns=["product_id", "kind"]).to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"rui_ro_{day:%Y%m%d}.csv", mime="text/csv", icon=":material/download:")
+
+
 # ---------------------------------------------------------------------------
 # Điều hướng (thanh bên)
 # ---------------------------------------------------------------------------
@@ -711,11 +1062,17 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
+pg_daily = st.Page(page_daily, title="Báo cáo cuối ngày", icon=":material/today:", url_path="cuoi-ngay")
+pg_kpi = st.Page(page_kpi, title="Đánh giá KPI theo quý", icon=":material/workspace_premium:", url_path="kpi")
+pg_risk = st.Page(page_risk, title="Quản lý rủi ro", icon=":material/warning:", url_path="rui-ro")
+
 # Quản trị viên: mọi trang. Nhân viên: chỉ các trang xem (không ghi phiếu, không sửa sản phẩm).
 # Trang không có trong danh sách thì không mở được, kể cả khi gõ thẳng địa chỉ.
+reports = [pg_daily, pg_kpi, pg_report, pg_risk]
 if USER["is_admin"]:
-    pages = [pg_stock, pg_tx, pg_products, pg_report, pg_history, pg_account]
+    pages = {"Kho hàng": [pg_stock, pg_tx, pg_products, pg_history], "Báo cáo & đánh giá": reports,
+             "Hệ thống": [pg_account]}
 else:
-    pages = [pg_stock, pg_report, pg_history, pg_account]
+    pages = {"Kho hàng": [pg_stock, pg_history], "Báo cáo & đánh giá": reports, "Hệ thống": [pg_account]}
 nav = st.navigation(pages)
 nav.run()
