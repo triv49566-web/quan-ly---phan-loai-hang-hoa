@@ -15,7 +15,7 @@ import sqlite3
 
 import pandas as pd
 
-from . import catalog
+from . import auth, catalog
 from .catalog import TX_DISPOSE, TX_IN, TX_OUT, TX_TYPES
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,7 +26,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL UNIQUE,
-    description TEXT DEFAULT ''
+    description TEXT DEFAULT '',
+    manager_id  INTEGER REFERENCES users(id) ON DELETE SET NULL  -- người quản lý phụ trách
 );
 CREATE TABLE IF NOT EXISTS products (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,6 +37,8 @@ CREATE TABLE IF NOT EXISTS products (
     price       REAL NOT NULL DEFAULT 0,      -- đơn giá tham khảo (đ / đơn vị)
     min_stock   REAL NOT NULL DEFAULT 0,      -- mức tồn tối thiểu (lượng dự trữ) để cảnh báo
     shelf_life_days INTEGER NOT NULL DEFAULT 365,  -- hạn sử dụng tính từ ngày nhập
+    storage_zone TEXT DEFAULT '',             -- khu bảo quản (trống = tự chọn theo hạn dùng)
+    storage_note TEXT DEFAULT '',             -- điều kiện bảo quản
     note        TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS transactions (
@@ -65,6 +68,7 @@ def init_db(path: str | None = None, seed: bool = True) -> None:
     path = path or DB_PATH
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with connect(path) as conn:
+        conn.executescript(auth.SCHEMA)   # bảng tài khoản (danh mục tham chiếu người quản lý)
         conn.executescript(SCHEMA)
         _migrate(conn)
         if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
@@ -79,6 +83,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(products)")}
     if "shelf_life_days" not in cols:
         conn.execute("ALTER TABLE products ADD COLUMN shelf_life_days INTEGER NOT NULL DEFAULT 365")
+    added = False
+    for col in ("storage_zone", "storage_note"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {col} TEXT DEFAULT ''")
+            added = True
+    if added:
+        _fill_storage_from_csv(conn)
+    cat_cols = {r["name"] for r in conn.execute("PRAGMA table_info(categories)")}
+    if "manager_id" not in cat_cols:
+        conn.execute("ALTER TABLE categories ADD COLUMN manager_id INTEGER "
+                     "REFERENCES users(id) ON DELETE SET NULL")
     sql = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'transactions'").fetchone()[0]
     if "dispose" not in sql:
         conn.executescript("""
@@ -97,22 +112,38 @@ def _migrate(conn: sqlite3.Connection) -> None:
         """)
 
 
+def _fill_storage_from_csv(conn: sqlite3.Connection) -> None:
+    """File dữ liệu cũ: lấy khu / điều kiện bảo quản mẫu theo tên sản phẩm."""
+    prod_csv = os.path.join(RAW_DIR, "products.csv")
+    if not os.path.exists(prod_csv):
+        return
+    df = pd.read_csv(prod_csv, encoding="utf-8-sig")
+    if "storage_note" not in df.columns:
+        return
+    df = df.fillna({"storage_zone": "", "storage_note": ""})
+    conn.executemany(
+        "UPDATE products SET storage_zone = ?, storage_note = ? WHERE name = ? AND storage_note = ''",
+        [(r.storage_zone, r.storage_note, r.name) for r in df.itertuples(index=False)])
+
+
 def _seed_from_csv(conn: sqlite3.Connection) -> None:
     prod_csv = os.path.join(RAW_DIR, "products.csv")
     tx_csv = os.path.join(RAW_DIR, "transactions.csv")
     if not os.path.exists(prod_csv):
         return
     cat_ids = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM categories")}
-    products = pd.read_csv(prod_csv, encoding="utf-8-sig").fillna({"note": ""})
+    products = pd.read_csv(prod_csv, encoding="utf-8-sig").fillna(
+        {"note": "", "storage_zone": "", "storage_note": ""})
     for p in products.itertuples(index=False):
         if p.category not in cat_ids:
             cur = conn.execute("INSERT INTO categories(name) VALUES (?)", (p.category,))
             cat_ids[p.category] = cur.lastrowid
         shelf = int(getattr(p, "shelf_life_days", 365))
         conn.execute(
-            "INSERT INTO products(name, category_id, unit, price, min_stock, shelf_life_days, note)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (p.name, cat_ids[p.category], p.unit, float(p.price), float(p.min_stock), shelf, p.note))
+            "INSERT INTO products(name, category_id, unit, price, min_stock, shelf_life_days,"
+            " storage_zone, storage_note, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (p.name, cat_ids[p.category], p.unit, float(p.price), float(p.min_stock), shelf,
+             getattr(p, "storage_zone", ""), getattr(p, "storage_note", ""), p.note))
     if os.path.exists(tx_csv):
         prod_ids = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM products")}
         tx = pd.read_csv(tx_csv, encoding="utf-8-sig").fillna({"note": ""})
@@ -128,15 +159,36 @@ def _seed_from_csv(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 def categories_df(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(
-        "SELECT c.id, c.name, c.description, COUNT(p.id) AS products "
+        "SELECT c.id, c.name, c.description, c.manager_id, "
+        "COALESCE(NULLIF(u.full_name, ''), u.username) AS manager, COUNT(p.id) AS products "
         "FROM categories c LEFT JOIN products p ON p.category_id = c.id "
+        "LEFT JOIN users u ON u.id = c.manager_id "
         "GROUP BY c.id ORDER BY c.name", conn)
+
+
+def set_category_manager(conn: sqlite3.Connection, category_id: int, user_id: int | None) -> None:
+    """Giao (hoặc bỏ giao, user_id=None) một danh mục cho người quản lý."""
+    with conn:
+        conn.execute("UPDATE categories SET manager_id = ? WHERE id = ?", (user_id, category_id))
+
+
+def assign_from_config(conn: sqlite3.Connection, mapping) -> None:
+    """Phân công từ secrets: {"tên tài khoản": ["Danh mục 1", ...]} (chỉ gán danh mục chưa có người)."""
+    for username, cat_names in dict(mapping or {}).items():
+        u = conn.execute("SELECT id FROM users WHERE username = ?",
+                         (" ".join(str(username).split()).lower(),)).fetchone()
+        if u is None:
+            continue
+        for name in cat_names:
+            conn.execute("UPDATE categories SET manager_id = ? WHERE name = ? AND manager_id IS NULL",
+                         (u["id"], name))
+    conn.commit()
 
 
 def products_df(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(
         "SELECT p.id, p.name, p.category_id, c.name AS category, p.unit, p.price, "
-        "p.min_stock, p.shelf_life_days, p.note FROM products p "
+        "p.min_stock, p.shelf_life_days, p.storage_zone, p.storage_note, p.note, c.manager_id FROM products p "
         "LEFT JOIN categories c ON c.id = p.category_id ORDER BY c.name, p.name", conn)
 
 
@@ -196,7 +248,7 @@ def delete_category(conn: sqlite3.Connection, category_id: int) -> None:
 def add_product(conn: sqlite3.Connection, name: str, category_id: int | None, unit: str,
                 price: float, min_stock: float, note: str = "",
                 opening_qty: float = 0, date: dt.date | None = None,
-                shelf_life_days: int = 365) -> int:
+                shelf_life_days: int = 365, storage_zone: str = "", storage_note: str = "") -> int:
     """Thêm sản phẩm; nếu opening_qty > 0 thì ghi luôn một phiếu nhập tồn đầu."""
     _check_product(name, unit, price, min_stock)
     shelf = _check_shelf(shelf_life_days)
@@ -205,9 +257,10 @@ def add_product(conn: sqlite3.Connection, name: str, category_id: int | None, un
     try:
         with conn:
             cur = conn.execute(
-                "INSERT INTO products(name, category_id, unit, price, min_stock, shelf_life_days, note)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (name.strip(), category_id, unit, price, min_stock, shelf, note.strip()))
+                "INSERT INTO products(name, category_id, unit, price, min_stock, shelf_life_days,"
+                " storage_zone, storage_note, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name.strip(), category_id, unit, price, min_stock, shelf, storage_zone or "",
+                 (storage_note or "").strip(), note.strip()))
             pid = cur.lastrowid
             if opening_qty > 0:
                 conn.execute(
@@ -221,15 +274,17 @@ def add_product(conn: sqlite3.Connection, name: str, category_id: int | None, un
 
 def update_product(conn: sqlite3.Connection, product_id: int, name: str,
                    category_id: int | None, unit: str, price: float,
-                   min_stock: float, note: str = "", shelf_life_days: int = 365) -> None:
+                   min_stock: float, note: str = "", shelf_life_days: int = 365,
+                   storage_zone: str = "", storage_note: str = "") -> None:
     _check_product(name, unit, price, min_stock)
     shelf = _check_shelf(shelf_life_days)
     try:
         with conn:
             conn.execute(
                 "UPDATE products SET name=?, category_id=?, unit=?, price=?, min_stock=?,"
-                " shelf_life_days=?, note=? WHERE id=?",
-                (name.strip(), category_id, unit, price, min_stock, shelf, note.strip(), product_id))
+                " shelf_life_days=?, storage_zone=?, storage_note=?, note=? WHERE id=?",
+                (name.strip(), category_id, unit, price, min_stock, shelf, storage_zone or "",
+                 (storage_note or "").strip(), note.strip(), product_id))
     except sqlite3.IntegrityError:
         raise ValueError(f"Sản phẩm “{name}” đã tồn tại.") from None
 

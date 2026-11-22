@@ -43,6 +43,22 @@ def storage_class(shelf_life_days: float) -> str:
     return LONG_LIFE if shelf_life_days >= LONG_LIFE_DAYS else SHORT_LIFE
 
 
+# Khu bảo quản trong kho
+ZONE_COLD = "Kho mát 2–6 °C"
+ZONE_DRY = "Kho khô, thoáng mát"
+ZONE_FROZEN = "Kho đông lạnh ≤ −18 °C"
+ZONES = [ZONE_COLD, ZONE_DRY, ZONE_FROZEN]
+
+
+def default_zone(shelf_life_days: float) -> str:
+    """Khu mặc định khi chưa chọn: hàng mau hỏng → kho mát, còn lại → kho khô."""
+    return ZONE_COLD if shelf_life_days < LONG_LIFE_DAYS else ZONE_DRY
+
+
+def zone_of(zone: str | None, shelf_life_days: float) -> str:
+    return zone if zone else default_zone(shelf_life_days)
+
+
 def near_expiry_days(shelf_life_days: float) -> int:
     """Còn ≤ số ngày này là “cận hạn”: 20% hạn dùng, tối thiểu 2 ngày, tối đa 30 ngày."""
     return int(min(30, max(2, round(shelf_life_days * 0.2))))

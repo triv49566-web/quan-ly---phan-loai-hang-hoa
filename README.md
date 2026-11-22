@@ -25,7 +25,7 @@ thử ngay.
 
 ```
 quan_ly_hang_hoa/
-├── app.py                        # Ứng dụng Streamlit (giao diện, 9 trang)
+├── app.py                        # Ứng dụng Streamlit (giao diện, 11 trang)
 ├── requirements.txt              # Thư viện cần cài
 ├── README.md                     # Tài liệu này
 ├── .streamlit/
@@ -105,14 +105,24 @@ khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm tron
 | Nhóm | Trang | Công dụng |
 |------|-------|-----------|
 | Kho hàng | **Tồn kho** | Ô tổng quan, khối *Cần nhập hàng*, bảng tồn kho; lọc theo danh mục và **nhóm bảo quản** (*Để lâu được* / *Mau hỏng*), hạn dùng và lô gần hết hạn |
+| | **Thời hạn bảo quản** | Theo **khu bảo quản** (kho mát 2–6 °C, kho khô, kho đông lạnh): **còn bao nhiêu ngày nữa hết hạn**, ngày hết hạn, từng lô đã lưu kho bao lâu, điều kiện bảo quản, việc cần làm; hàng sắp hết hạn xếp lên đầu |
 | | **Nhập / Xuất kho** | Ghi phiếu **nhập**, **xuất** hoặc **hủy hàng** (hết hạn / hư hỏng); không cho xuất / hủy quá tồn kho |
 | | **Sản phẩm & danh mục** | Thêm / sửa / xóa sản phẩm (có **hạn sử dụng**, **mức dự trữ**); thêm / xóa danh mục |
 | | **Lịch sử giao dịch** | Lọc theo tên, loại, danh mục, khoảng ngày; tải CSV |
 | Báo cáo & đánh giá | **Báo cáo cuối ngày** | Chọn ngày: tồn đầu ngày, nhập, xuất, hủy, tồn cuối ngày, hàng cận hạn, hàng dưới mức dự trữ; tải CSV |
-| | **Đánh giá KPI theo quý** | Điểm tổng hợp & **xếp loại người phụ trách kho**, bảng *Tiêu chí – Chỉ số – Tiêu chuẩn*, so sánh với quý trước (cải thiện / xấu đi), biểu đồ xu hướng, **phương án cải tiến**; tải CSV |
+| | **KPI người quản lý kho** | Chấm điểm **từng người quản lý** theo các danh mục được giao: hạng, điểm, xếp loại, nhận xét, so sánh 8 chỉ số giữa các người, điểm qua các quý, phương án cải tiến theo từng người. Quản trị viên xem cả bảng xếp hạng; người quản lý chỉ thấy KPI của mình |
+| | **KPI toàn kho** | Điểm tổng hợp & xếp loại cho cả kho, bảng *Tiêu chí – Chỉ số – Tiêu chuẩn*, so sánh với quý trước (cải thiện / xấu đi), biểu đồ xu hướng, **phương án cải tiến**; tải CSV |
 | | **Báo cáo** | Biểu đồ: giá trị tồn theo danh mục, trạng thái, nhập / xuất / hủy **theo tháng hoặc theo quý**, top hàng xuất nhiều, tồn theo nhóm bảo quản, hàng hủy theo quý |
 | | **Quản lý rủi ro** | Danh sách rủi ro (hết hàng, dưới dự trữ, cận hạn, quá hạn, tồn đọng), **ma trận rủi ro** khả năng × ảnh hưởng, biện pháp xử lý; tải CSV |
 | Hệ thống | **Tài khoản** | Đổi mật khẩu; quản trị viên quản lý tài khoản |
+
+**Phân công người quản lý:** quản trị viên vào *Sản phẩm & danh mục → Người quản lý phụ trách*,
+chọn người cho từng danh mục rồi bấm *Lưu phân công*. KPI của mỗi người tính từ các danh mục được giao.
+Có thể phân công sẵn trong secrets (mục `[auth.assign]`, xem `.streamlit/secrets.toml.example`).
+
+**Khu & điều kiện bảo quản** của mỗi sản phẩm sửa ở form *Thêm / Sửa sản phẩm*. Để trống khu thì
+tự chọn: hạn dùng < 90 ngày → kho mát 2–6 °C, còn lại → kho khô. Điều kiện bảo quản trong dữ liệu
+mẫu là giá trị tham khảo.
 
 **Đăng nhập:**
 - Mọi trang đều cần đăng nhập bằng *tài khoản* và *mật khẩu*.
@@ -126,7 +136,7 @@ khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm tron
   | Loại | Thấy các trang |
   |------|----------------|
   | **Quản trị viên** | Tất cả các trang |
-  | **Nhân viên (chỉ xem)** | Tồn kho, Lịch sử giao dịch, 4 trang báo cáo & đánh giá, Tài khoản (đổi mật khẩu). Không ghi phiếu, không sửa sản phẩm / danh mục |
+  | **Nhân viên (chỉ xem)** | Tồn kho, Thời hạn bảo quản, Lịch sử giao dịch, 5 trang báo cáo & đánh giá, Tài khoản (đổi mật khẩu). Không ghi phiếu, không sửa sản phẩm / danh mục |
 
   Khi thêm tài khoản, bỏ trống ô *Quản trị viên* là tạo tài khoản nhân viên.
 - Mật khẩu được băm (PBKDF2-SHA256, có salt), không lưu dạng chữ thường.
@@ -157,6 +167,8 @@ Mô phỏng từ **01/01/2026 đến 12/11/2026 (4 quý)**:
 | `price` | Đơn giá tham khảo (đ / đơn vị) |
 | `min_stock` | Mức tồn tối thiểu = lượng dự trữ phải giữ (để cảnh báo) |
 | `shelf_life_days` | Hạn sử dụng (ngày, tính từ ngày nhập). ≥ 90 ngày: *Để lâu được*; ngắn hơn: *Mau hỏng* |
+| `storage_zone` | Khu bảo quản (Kho mát 2–6 °C / Kho khô, thoáng mát / Kho đông lạnh) |
+| `storage_note` | Điều kiện bảo quản (giá trị tham khảo) |
 | `note` | Ghi chú |
 
 **`transactions.csv`**
@@ -186,9 +198,11 @@ Mô phỏng từ **01/01/2026 đến 12/11/2026 (4 quý)**:
 
 Chi tiết trong [`src/inventory.py`](src/inventory.py) và [`src/catalog.py`](src/catalog.py).
 
-### KPI đánh giá quy trình quản lý kho (theo quý)
+### KPI đánh giá người quản lý kho (theo quý)
 
-**1. Đối tượng:** quy trình quản lý kho nhu yếu phẩm (qua đó đánh giá người phụ trách kho).
+**1. Đối tượng:** **người quản lý kho**, đánh giá qua kết quả quy trình quản lý các danh mục họ phụ trách.
+Sản phẩm chỉ là dữ liệu đầu vào, không phải đối tượng bị chấm điểm. Trang *KPI toàn kho* dùng cùng
+bộ chỉ số cho tất cả danh mục.
 **2. Tiêu chí → Chỉ số → Tiêu chuẩn:**
 
 | Tiêu chí | Chỉ số | Công thức | Tiêu chuẩn (Đạt · Cảnh báo) | Trọng số |

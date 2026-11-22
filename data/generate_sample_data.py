@@ -65,6 +65,29 @@ PRODUCTS = [
     ("Trứng gà",              "Thực phẩm tươi", "quả",  3500,  40,   20.0,  200,  21),
 ]
 
+# Khu và điều kiện bảo quản (giá trị tham khảo, sửa được trong app)
+ZONE_COLD, ZONE_DRY = "Kho mát 2–6 °C", "Kho khô, thoáng mát"
+STORAGE = {
+    "Sữa tươi không đường": (ZONE_COLD, "Giữ lạnh liên tục, đậy kín sau khi mở"),
+    "Sữa chua": (ZONE_COLD, "Giữ lạnh, không để ngăn đá"),
+    "Trứng gà": (ZONE_COLD, "Không rửa trước khi cất, đầu nhọn quay xuống"),
+    "Sữa đặc có đường": (ZONE_DRY, "Tránh nắng, hộp móp / phồng thì loại"),
+    "Nước suối 500ml": (ZONE_DRY, "Tránh nắng trực tiếp và nguồn nhiệt"),
+    "Gạo ST25": (ZONE_DRY, "Thùng kín, kê cao khỏi sàn, chống mọt"),
+    "Gạo nếp": (ZONE_DRY, "Thùng kín, kê cao khỏi sàn, chống mọt"),
+    "Mì gói": (ZONE_DRY, "Khô ráo, tránh đè nặng làm vỡ"),
+    "Bún khô": (ZONE_DRY, "Khô ráo, túi kín"),
+    "Muối i-ốt": (ZONE_DRY, "Túi / hũ kín, tránh ẩm"),
+    "Tiêu đen xay": (ZONE_DRY, "Hũ kín, tránh ẩm và ánh sáng"),
+    "Bột ngọt": (ZONE_DRY, "Túi kín, tránh ẩm"),
+    "Đường cát trắng": (ZONE_DRY, "Túi kín, tránh ẩm và kiến"),
+    "Nước mắm": (ZONE_DRY, "Đậy kín, tránh nắng"),
+    "Nước tương": (ZONE_DRY, "Đậy kín, tránh nắng"),
+    "Dầu ăn đậu nành": (ZONE_DRY, "Nơi mát, tránh nắng và bếp nóng"),
+    "Dầu mè": (ZONE_DRY, "Nơi mát, tránh nắng và bếp nóng"),
+    "Đậu xanh": (ZONE_DRY, "Túi kín, khô ráo, chống mọt"),
+}
+
 # Mùa vụ theo tháng (Tết: tháng 1–2 bán chạy)
 SEASON = {1: 1.25, 2: 1.30, 3: 0.95, 4: 0.95, 5: 1.0, 6: 1.0,
           7: 1.0, 8: 1.0, 9: 1.05, 10: 1.0, 11: 1.05, 12: 1.15}
@@ -96,8 +119,9 @@ def daily_out(unit: str, mean: float) -> float:
 
 def build() -> tuple[pd.DataFrame, pd.DataFrame]:
     products = pd.DataFrame(
-        [(n, c, u, p, m, s, "") for n, c, u, p, m, _, _, s in PRODUCTS],
-        columns=["name", "category", "unit", "price", "min_stock", "shelf_life_days", "note"],
+        [(n, c, u, p, m, s, STORAGE[n][0], STORAGE[n][1], "") for n, c, u, p, m, _, _, s in PRODUCTS],
+        columns=["name", "category", "unit", "price", "min_stock", "shelf_life_days",
+                 "storage_zone", "storage_note", "note"],
     )
 
     tx = []
