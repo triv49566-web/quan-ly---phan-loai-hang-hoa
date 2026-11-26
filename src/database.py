@@ -16,7 +16,7 @@ import sqlite3
 import pandas as pd
 
 from . import auth, catalog
-from .catalog import TX_DISPOSE, TX_IN, TX_OUT, TX_TYPES
+from .catalog import ALL_TX_TYPES, TX_ADJ_MINUS, TX_ADJ_PLUS, TX_DISPOSE, TX_IN, TX_OUT
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(ROOT, "data", "hanghoa.db")
@@ -45,10 +45,20 @@ CREATE TABLE IF NOT EXISTS transactions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,                -- YYYY-MM-DD
     product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    type        TEXT NOT NULL CHECK (type IN ('in', 'out', 'dispose')),  -- nhập / xuất / hủy
+    type        TEXT NOT NULL CHECK (type IN ('in', 'out', 'dispose', 'adj_plus', 'adj_minus')),
     quantity    REAL NOT NULL CHECK (quantity > 0),
     unit_price  REAL NOT NULL DEFAULT 0,
-    note        TEXT DEFAULT ''
+    note        TEXT DEFAULT '',
+    created_by  TEXT DEFAULT ''                -- tên tài khoản người lập phiếu
+);
+CREATE TABLE IF NOT EXISTS stocktakes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT NOT NULL,
+    product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    book_qty    REAL NOT NULL,                -- tồn trên sổ lúc kiểm kê
+    counted_qty REAL NOT NULL CHECK (counted_qty >= 0),  -- tồn đếm thực tế
+    note        TEXT DEFAULT '',
+    created_by  TEXT DEFAULT ''
 );
 """
 
@@ -95,19 +105,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE categories ADD COLUMN manager_id INTEGER "
                      "REFERENCES users(id) ON DELETE SET NULL")
     sql = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'transactions'").fetchone()[0]
-    if "dispose" not in sql:
+    if "adj_plus" not in sql:
         conn.executescript("""
             ALTER TABLE transactions RENAME TO transactions_old;
             CREATE TABLE transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-                type TEXT NOT NULL CHECK (type IN ('in', 'out', 'dispose')),
+                type TEXT NOT NULL CHECK (type IN ('in', 'out', 'dispose', 'adj_plus', 'adj_minus')),
                 quantity REAL NOT NULL CHECK (quantity > 0),
                 unit_price REAL NOT NULL DEFAULT 0,
-                note TEXT DEFAULT ''
+                note TEXT DEFAULT '',
+                created_by TEXT DEFAULT ''
             );
-            INSERT INTO transactions SELECT * FROM transactions_old;
+            INSERT INTO transactions(id, date, product_id, type, quantity, unit_price, note)
+                SELECT id, date, product_id, type, quantity, unit_price, note FROM transactions_old;
             DROP TABLE transactions_old;
         """)
 
@@ -146,12 +158,20 @@ def _seed_from_csv(conn: sqlite3.Connection) -> None:
              getattr(p, "storage_zone", ""), getattr(p, "storage_note", ""), p.note))
     if os.path.exists(tx_csv):
         prod_ids = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM products")}
-        tx = pd.read_csv(tx_csv, encoding="utf-8-sig").fillna({"note": ""})
+        tx = pd.read_csv(tx_csv, encoding="utf-8-sig").fillna({"note": "", "created_by": ""})
         conn.executemany(
-            "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            [(t.date, prod_ids[t.product], t.type, float(t.quantity), float(t.unit_price), t.note)
-             for t in tx.itertuples(index=False)])
+            "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note, created_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(t.date, prod_ids[t.product], t.type, float(t.quantity), float(t.unit_price), t.note,
+              getattr(t, "created_by", "")) for t in tx.itertuples(index=False)])
+        st_csv = os.path.join(RAW_DIR, "stocktakes.csv")
+        if os.path.exists(st_csv):
+            stc = pd.read_csv(st_csv, encoding="utf-8-sig").fillna({"note": "", "created_by": ""})
+            conn.executemany(
+                "INSERT INTO stocktakes(date, product_id, book_qty, counted_qty, note, created_by)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [(r.date, prod_ids[r.product], float(r.book_qty), float(r.counted_qty), r.note,
+                  r.created_by) for r in stc.itertuples(index=False)])
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +215,7 @@ def products_df(conn: sqlite3.Connection) -> pd.DataFrame:
 def transactions_df(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query(
         "SELECT t.id, t.date, t.product_id, p.name AS product, c.name AS category, "
-        "p.unit, t.type, t.quantity, t.unit_price, t.note FROM transactions t "
+        "p.unit, t.type, t.quantity, t.unit_price, t.note, t.created_by FROM transactions t "
         "JOIN products p ON p.id = t.product_id "
         "LEFT JOIN categories c ON c.id = p.category_id "
         "ORDER BY t.date DESC, t.id DESC", conn)
@@ -205,7 +225,7 @@ def transactions_df(conn: sqlite3.Connection) -> pd.DataFrame:
 
 def current_stock(conn: sqlite3.Connection, product_id: int) -> float:
     row = conn.execute(
-        "SELECT COALESCE(SUM(CASE type WHEN 'in' THEN quantity ELSE -quantity END), 0) "
+        "SELECT COALESCE(SUM(CASE WHEN type IN ('in', 'adj_plus') THEN quantity ELSE -quantity END), 0) "
         "FROM transactions WHERE product_id = ?", (product_id,)).fetchone()
     return round(float(row[0]), 3)
 
@@ -295,11 +315,47 @@ def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
         conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
 
 
+def stocktakes_df(conn: sqlite3.Connection) -> pd.DataFrame:
+    df = pd.read_sql_query(
+        "SELECT s.id, s.date, s.product_id, p.name AS product, c.name AS category, p.unit, p.price, "
+        "s.book_qty, s.counted_qty, s.counted_qty - s.book_qty AS diff, s.note, s.created_by "
+        "FROM stocktakes s JOIN products p ON p.id = s.product_id "
+        "LEFT JOIN categories c ON c.id = p.category_id ORDER BY s.date DESC, s.id DESC", conn)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def add_stocktake(conn: sqlite3.Connection, product_id: int, counted_qty: float,
+                  date: dt.date | None = None, note: str = "", created_by: str = "") -> float:
+    """Ghi phiếu kiểm kê; nếu lệch sổ thì tự lập phiếu điều chỉnh cho tồn kho khớp thực tế.
+
+    Trả về số chênh lệch (thực tế − sổ sách).
+    """
+    if counted_qty is None or counted_qty < 0:
+        raise ValueError("Số lượng đếm thực tế phải ≥ 0.")
+    book = current_stock(conn, product_id)
+    diff = round(counted_qty - book, 3)
+    d = (date or dt.date.today()).isoformat()
+    price = conn.execute("SELECT price FROM products WHERE id = ?", (product_id,)).fetchone()
+    if price is None:
+        raise ValueError("Sản phẩm không tồn tại.")
+    with conn:
+        conn.execute("INSERT INTO stocktakes(date, product_id, book_qty, counted_qty, note, created_by)"
+                     " VALUES (?, ?, ?, ?, ?, ?)", (d, product_id, book, counted_qty, note.strip(), created_by))
+        if abs(diff) > 1e-9:
+            conn.execute(
+                "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note, created_by)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (d, product_id, TX_ADJ_PLUS if diff > 0 else TX_ADJ_MINUS, abs(diff), float(price[0]),
+                 "Chênh lệch kiểm kê", created_by))
+    return diff
+
+
 def add_transaction(conn: sqlite3.Connection, product_id: int, tx_type: str,
                     quantity: float, unit_price: float,
-                    date: dt.date | None = None, note: str = "") -> None:
+                    date: dt.date | None = None, note: str = "", created_by: str = "") -> None:
     """Ghi một phiếu nhập / xuất / hủy hàng. Không cho xuất hoặc hủy vượt quá tồn kho."""
-    if tx_type not in TX_TYPES:
+    if tx_type not in (TX_IN, TX_OUT, TX_DISPOSE):
         raise ValueError("Loại giao dịch không hợp lệ.")
     if quantity <= 0:
         raise ValueError("Số lượng phải lớn hơn 0.")
@@ -312,7 +368,7 @@ def add_transaction(conn: sqlite3.Connection, product_id: int, tx_type: str,
             raise ValueError(f"Không đủ hàng để {verb}: chỉ còn {catalog.fmt_qty(stock)}.")
     with conn:
         conn.execute(
-            "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note, created_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             ((date or dt.date.today()).isoformat(), product_id, tx_type,
-             quantity, unit_price, note.strip()))
+             quantity, unit_price, note.strip(), created_by))

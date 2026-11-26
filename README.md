@@ -107,7 +107,8 @@ khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm tron
 |------|-------|-----------|
 | Kho hàng | **Tồn kho** | Ô tổng quan, khối *Cần nhập hàng*, bảng tồn kho; lọc theo danh mục và **nhóm bảo quản** (*Để lâu được* / *Mau hỏng*), hạn dùng và lô gần hết hạn |
 | | **Thời hạn bảo quản** | Theo **khu bảo quản** (kho mát 2–6 °C, kho khô, kho đông lạnh): **còn bao nhiêu ngày nữa hết hạn**, ngày hết hạn, từng lô đã lưu kho bao lâu, điều kiện bảo quản, việc cần làm; hàng sắp hết hạn xếp lên đầu |
-| | **Nhập / Xuất kho** | Ghi phiếu **nhập**, **xuất** hoặc **hủy hàng** (hết hạn / hư hỏng); không cho xuất / hủy quá tồn kho |
+| | **Nhập / Xuất kho** | Ghi phiếu **nhập**, **xuất** hoặc **hủy hàng** (hết hạn / hư hỏng); không cho xuất / hủy quá tồn kho; mỗi phiếu lưu **người lập** |
+| | **Kiểm kê** | Nhập số **đếm thực tế**, so với sổ sách; lệch thì tự lập phiếu điều chỉnh. Tính **độ chính xác tồn kho**, giá trị hao hụt; lọc các lần lệch sổ |
 | | **Sản phẩm & danh mục** | Thêm / sửa / xóa sản phẩm (có **hạn sử dụng**, **mức dự trữ**); thêm / xóa danh mục |
 | | **Lịch sử giao dịch** | Lọc theo tên, loại, danh mục, khoảng ngày; tải CSV |
 | Báo cáo & đánh giá | **Báo cáo cuối ngày** | Chọn ngày: tồn đầu ngày, nhập, xuất, hủy, tồn cuối ngày, hàng cận hạn, hàng dưới mức dự trữ; tải CSV |
@@ -132,14 +133,16 @@ mẫu là giá trị tham khảo.
   `.streamlit/secrets.toml.example`); trên Streamlit Cloud dán vào *Settings → Secrets*.
 - Trang **Tài khoản**: ai cũng đổi được mật khẩu của mình; quản trị viên thêm / xóa
   tài khoản và đặt lại mật khẩu cho người khác.
-- Hai loại tài khoản:
+- Ba loại tài khoản (vai trò):
 
-  | Loại | Thấy các trang |
-  |------|----------------|
-  | **Quản trị viên** | Tất cả các trang |
-  | **Nhân viên (chỉ xem)** | Tồn kho, Thời hạn bảo quản, Lịch sử giao dịch, 5 trang báo cáo & đánh giá, Tài khoản (đổi mật khẩu). Không ghi phiếu, không sửa sản phẩm / danh mục |
+  | Vai trò | Được làm gì |
+  |---------|-------------|
+  | **Quản trị viên** | Tất cả các trang: sửa sản phẩm, danh mục, phân công, tài khoản; xem bảng xếp hạng KPI mọi người |
+  | **Quản lý kho** | Ghi phiếu nhập / xuất / hủy và **kiểm kê** cho **danh mục được giao**; xem báo cáo; được chấm **KPI cá nhân** (chỉ thấy KPI của mình). Không sửa sản phẩm, tài khoản |
+  | **Nhân viên (chỉ xem)** | Xem tồn kho, thời hạn bảo quản, lịch sử, báo cáo. Không ghi phiếu |
 
-  Khi thêm tài khoản, bỏ trống ô *Quản trị viên* là tạo tài khoản nhân viên.
+  Chọn vai trò khi *Thêm tài khoản*, hoặc đổi sau bằng nút *Đổi vai trò* ở trang Tài khoản.
+  Trong secrets: `[auth.managers]` tạo tài khoản quản lý kho, `[auth.staff]` tạo tài khoản chỉ xem.
 - Mật khẩu được băm (PBKDF2-SHA256, có salt), không lưu dạng chữ thường.
   Nhập sai 5 lần liên tiếp phải chờ 60 giây.
 - Tải lại trang (F5) sẽ phải đăng nhập lại.
@@ -182,6 +185,13 @@ Mô phỏng từ **01/01/2026 đến 12/11/2026 (4 quý)**:
 | `quantity` | Số lượng (theo đơn vị của sản phẩm) |
 | `unit_price` | Đơn giá của giao dịch |
 | `note` | Ghi chú |
+| `created_by` | Tên tài khoản người lập phiếu |
+
+`type` còn có `adj_plus` / `adj_minus` = điều chỉnh sau kiểm kê (thực tế thừa / thiếu so với sổ).
+
+**`stocktakes.csv`** (kiểm kê cuối mỗi tháng): `date`, `product`, `book_qty` (tồn trên sổ),
+`counted_qty` (đếm thực tế), `note`, `created_by`. Dữ liệu mẫu có 3 người quản lý kho
+(`nhan vien 1/2/3`, mỗi người 2 danh mục); người thứ 3 mô phỏng người mới, hay lệch sổ hơn.
 
 ---
 
@@ -208,16 +218,19 @@ bộ chỉ số cho tất cả danh mục.
 
 | Tiêu chí | Chỉ số | Công thức | Tiêu chuẩn (Đạt · Cảnh báo) | Trọng số |
 |----------|--------|-----------|-----------------------------|----------|
-| Bảo đảm dự trữ | Tỷ lệ ngày còn hàng | (ngày × mặt hàng) tồn > 0 ÷ tổng | ≥ 98% · ≥ 95% | 20% |
+| Bảo đảm dự trữ | Tỷ lệ ngày còn hàng | (ngày × mặt hàng) tồn > 0 ÷ tổng | ≥ 98% · ≥ 95% | 15% |
 | | Tỷ lệ đạt mức dự trữ | (ngày × mặt hàng) tồn > mức tối thiểu ÷ tổng | ≥ 90% · ≥ 80% | 15% |
 | | Số lần hết hàng | số lần chuyển từ còn hàng sang hết hàng | ≤ 2 · ≤ 5 | 10% |
 | Chất lượng bảo quản | Tỷ lệ hao hụt do hết hạn | giá trị hủy ÷ giá trị nhập | ≤ 1% · ≤ 3% | 15% |
-| | Tỷ lệ hàng cận hạn cuối quý | giá trị lô cận hạn ÷ giá trị tồn | ≤ 5% · ≤ 10% | 10% |
+| | Tỷ lệ hàng cận hạn cuối quý | giá trị lô cận hạn ÷ giá trị tồn | ≤ 5% · ≤ 10% | 5% |
 | Hiệu suất sử dụng vốn | Vòng quay tồn kho (quy năm) | giá trị xuất ÷ tồn bình quân × 365 ÷ số ngày | ≥ 24 · ≥ 15 | 10% |
-| | Tỷ lệ hàng tồn đọng | giá trị hàng cần > 60 ngày mới bán hết ÷ giá trị tồn | ≤ 10% · ≤ 20% | 10% |
+| | Tỷ lệ hàng tồn đọng | giá trị hàng cần > 60 ngày mới bán hết ÷ giá trị tồn | ≤ 10% · ≤ 20% | 5% |
 | Tuân thủ quy trình | Tỷ lệ nhập hàng kịp thời | lần chạm mức dự trữ có phiếu nhập trong ≤ 2 ngày ÷ tổng | ≥ 90% · ≥ 75% | 10% |
+| Chính xác sổ sách | Độ chính xác tồn kho (kiểm kê) | số lần kiểm kê khớp sổ (lệch ≤ 0,5%) ÷ tổng số lần kiểm kê | ≥ 95% · ≥ 85% | 15% |
 
-**3. Dữ liệu:** phiếu nhập / xuất / hủy và danh mục sản phẩm (đơn giá, mức dự trữ, hạn dùng).
+**3. Dữ liệu:** phiếu nhập / xuất / hủy, phiếu kiểm kê và danh mục sản phẩm (đơn giá, mức dự trữ, hạn dùng).
+
+> Tiêu chuẩn và trọng số là giá trị giả định để minh họa; chỉnh trong `KPI_DEFS` ở `src/kpi.py`.
 
 **Điểm tổng hợp** = Σ trọng số × hệ số (Đạt 100% · Cảnh báo 60% · Chưa đạt 20%).
 **Xếp loại:** A ≥ 85 (Tốt) · B ≥ 70 (Khá) · C ≥ 50 (Trung bình) · D < 50 (Cần cải thiện).

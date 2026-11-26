@@ -12,8 +12,11 @@ Mô phỏng một cửa hàng / kho nhỏ từ 01/01/2026 đến 12/11/2026 (4 q
     hỏng nhỏ lại cho vừa sức bán → ít hết hàng, ít hủy hàng (để thấy KPI cải thiện)
   - một vài mặt hàng ngừng nhập ở cuối kỳ → có ví dụ "Sắp hết" / "Hết hàng"
 
+  - 3 người quản lý kho, mỗi người phụ trách 2 danh mục; mọi phiếu ghi người lập
+  - cuối mỗi tháng kiểm kê; lệch sổ thì lập phiếu điều chỉnh (người mới hay lệch hơn)
+
 Chạy:  python data/generate_sample_data.py
-Kết quả: data/raw/products.csv và data/raw/transactions.csv
+Kết quả: data/raw/products.csv, data/raw/transactions.csv, data/raw/stocktakes.csv
 (Sau khi sinh lại, xóa file data/hanghoa.db để app nạp dữ liệu mới.)
 """
 
@@ -88,6 +91,20 @@ STORAGE = {
     "Đậu xanh": (ZONE_DRY, "Túi kín, khô ráo, chống mọt"),
 }
 
+# Người quản lý phụ trách từng danh mục (tên tài khoản)
+MANAGERS = {
+    "nhan vien 1": ["Sữa & đồ uống", "Thực phẩm tươi"],
+    "nhan vien 2": ["Lương thực", "Đồ khô"],
+    "nhan vien 3": ["Gia vị", "Dầu ăn"],
+}
+OWNER = {cat: user for user, cats in MANAGERS.items() for cat in cats}
+# Khả năng kiểm kê bị lệch sổ theo quý (Q1..Q4): mỗi người cải thiện theo nhịp riêng
+COUNT_ERROR = {
+    "nhan vien 1": [0.20, 0.12, 0.06, 0.03],
+    "nhan vien 2": [0.15, 0.08, 0.05, 0.03],
+    "nhan vien 3": [0.35, 0.28, 0.20, 0.14],
+}
+
 # Mùa vụ theo tháng (Tết: tháng 1–2 bán chạy)
 SEASON = {1: 1.25, 2: 1.30, 3: 0.95, 4: 0.95, 5: 1.0, 6: 1.0,
           7: 1.0, 8: 1.0, 9: 1.05, 10: 1.0, 11: 1.05, 12: 1.15}
@@ -117,7 +134,7 @@ def daily_out(unit: str, mean: float) -> float:
     return rounder(unit)(mean * RNG.uniform(0.4, 1.6))
 
 
-def build() -> tuple[pd.DataFrame, pd.DataFrame]:
+def build() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     products = pd.DataFrame(
         [(n, c, u, p, m, s, STORAGE[n][0], STORAGE[n][1], "") for n, c, u, p, m, _, _, s in PRODUCTS],
         columns=["name", "category", "unit", "price", "min_stock", "shelf_life_days",
@@ -125,8 +142,10 @@ def build() -> tuple[pd.DataFrame, pd.DataFrame]:
     )
 
     tx = []
-    for name, _cat, unit, price, min_stock, daily, lot, shelf in PRODUCTS:
+    counts = []
+    for name, cat, unit, price, min_stock, daily, lot, shelf in PRODUCTS:
         rnd = rounder(unit)
+        who = OWNER[cat]
         lots: deque = deque()            # mỗi lô: [ngày nhập, số lượng còn, đơn giá nhập]
         perishable = shelf < LONG_LIFE_DAYS
 
@@ -139,13 +158,13 @@ def build() -> tuple[pd.DataFrame, pd.DataFrame]:
         def receive(day: dt.date, qty: float, note: str) -> None:
             in_price = round(price * RNG.uniform(0.95, 1.05), -2) if note != "Tồn đầu kỳ" else price
             lots.append([day, qty, in_price])
-            tx.append((day, name, "in", qty, in_price, note))
+            tx.append((day, name, "in", qty, in_price, note, who))
 
         def consume(day: dt.date, qty: float, kind: str, note: str = "") -> None:
             """Lấy hàng theo FIFO; ghi phiếu theo từng lô (đơn giá của lô)."""
             while qty > 1e-9 and lots:
                 take = min(qty, lots[0][1])
-                tx.append((day, name, kind, take, price if kind == "out" else lots[0][2], note))
+                tx.append((day, name, kind, take, price if kind == "out" else lots[0][2], note, who))
                 lots[0][1] = round(lots[0][1] - take, 3)
                 qty = round(qty - take, 3)
                 if lots[0][1] <= 1e-9:
@@ -169,25 +188,47 @@ def build() -> tuple[pd.DataFrame, pd.DataFrame]:
             qty = min(demand, stock)
             if qty > 0:
                 consume(day, qty, "out")
+            # 4) Kiểm kê cuối tháng
+            if (day + dt.timedelta(days=1)).month != day.month:
+                book = round(sum(l[1] for l in lots), 3)
+                counted = book
+                if book > 0 and RNG.random() < COUNT_ERROR[who][q]:
+                    diff = book * RNG.uniform(0.02, 0.07)
+                    diff = max(rnd(diff), 1.0 if (unit in COUNT_UNITS or unit == "g") else 0.1)
+                    diff = min(diff, book)
+                    if RNG.random() < 0.85:                       # thiếu: hao hụt, mất mát
+                        counted = round(book - diff, 3)
+                        consume(day, diff, "adj_minus", "Chênh lệch kiểm kê")
+                    else:                                          # thừa: ghi thiếu phiếu nhập
+                        counted = round(book + diff, 3)
+                        lots.append([day, diff, price])
+                        tx.append((day, name, "adj_plus", diff, price, "Chênh lệch kiểm kê", who))
+                counts.append((day, name, book, counted, "Kiểm kê cuối tháng", who))
             day += dt.timedelta(days=1)
 
-    tx_df = pd.DataFrame(tx, columns=["date", "product", "type", "quantity", "unit_price", "note"])
+    tx_df = pd.DataFrame(tx, columns=["date", "product", "type", "quantity", "unit_price", "note",
+                                      "created_by"])
     tx_df = tx_df[tx_df["quantity"] > 0]
-    order = {"in": 0, "dispose": 1, "out": 2}
+    order = {"in": 0, "dispose": 1, "out": 2, "adj_plus": 3, "adj_minus": 3}
     tx_df["_o"] = tx_df["type"].map(order)
     tx_df = tx_df.sort_values(["date", "_o", "product"], kind="stable").drop(columns="_o")
     tx_df["date"] = pd.to_datetime(tx_df["date"]).dt.strftime("%Y-%m-%d")
-    return products, tx_df
+    st_df = pd.DataFrame(counts, columns=["date", "product", "book_qty", "counted_qty", "note", "created_by"])
+    st_df["date"] = pd.to_datetime(st_df["date"]).dt.strftime("%Y-%m-%d")
+    return products, tx_df, st_df.sort_values(["date", "product"])
 
 
 def main() -> None:
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "raw")
     os.makedirs(out_dir, exist_ok=True)
-    products, tx = build()
+    products, tx, counts = build()
     p_path = os.path.join(out_dir, "products.csv")
     t_path = os.path.join(out_dir, "transactions.csv")
     products.to_csv(p_path, index=False, encoding="utf-8-sig")
     tx.to_csv(t_path, index=False, encoding="utf-8-sig")
+    c_path = os.path.join(out_dir, "stocktakes.csv")
+    counts.to_csv(c_path, index=False, encoding="utf-8-sig")
+    print(f"Đã tạo {len(counts)} lần kiểm kê -> {c_path}")
     print(f"Đã tạo {len(products)} sản phẩm  -> {p_path}")
     print(f"Đã tạo {len(tx)} giao dịch -> {t_path}")
     print(tx["type"].value_counts().to_string())

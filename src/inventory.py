@@ -12,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .catalog import TX_IN, TX_OUT, UNCATEGORIZED, evaluate_stock
+from .catalog import POSITIVE_TYPES, TX_IN, TX_OUT, UNCATEGORIZED, evaluate_stock
 
 WINDOW_DAYS = 30  # số ngày dùng để tính mức tiêu thụ bình quân
 
@@ -32,8 +32,7 @@ def stock_table(products: pd.DataFrame, tx: pd.DataFrame,
         qty = pd.Series(dtype=float)
         out_w = pd.Series(dtype=float)
     else:
-        sign = np.where(tx["type"] == TX_IN, 1.0, -1.0)
-        qty = (tx["quantity"] * sign).groupby(tx["product_id"]).sum()
+        qty = signed(tx).groupby(tx["product_id"]).sum()
         # Mốc tính = ngày giao dịch gần nhất (ổn định cả khi dùng dữ liệu mẫu cũ)
         as_of = tx["date"].max()
         recent = tx[(tx["type"] == TX_OUT) &
@@ -86,8 +85,8 @@ def top_consumed(stock: pd.DataFrame, n: int = 10) -> pd.DataFrame:
 # Tồn kho theo NGÀY và theo LÔ HÀNG (dùng cho KPI, báo cáo cuối ngày, rủi ro)
 # ---------------------------------------------------------------------------
 def signed(tx: pd.DataFrame) -> pd.Series:
-    """Số lượng có dấu: nhập +, xuất / hủy −."""
-    return tx["quantity"] * np.where(tx["type"] == TX_IN, 1.0, -1.0)
+    """Số lượng có dấu: nhập / kiểm kê thừa +, xuất / hủy / kiểm kê thiếu −."""
+    return tx["quantity"] * np.where(tx["type"].isin(POSITIVE_TYPES), 1.0, -1.0)
 
 
 def daily_stock(products: pd.DataFrame, tx: pd.DataFrame,
@@ -114,13 +113,13 @@ def lots_at(products: pd.DataFrame, tx: pd.DataFrame, date: pd.Timestamp) -> pd.
 
     shelf = dict(zip(products["id"], products["shelf_life_days"]))
     t = tx[tx["date"] <= date].copy()
-    t["_o"] = t["type"].map({TX_IN: 0}).fillna(1)
+    t["_o"] = np.where(t["type"].isin(POSITIVE_TYPES), 0, 1)
     t = t.sort_values(["date", "_o", "id"])
     rows = []
     for pid, g in t.groupby("product_id", sort=False):
         lots = []  # [ngày nhập, số lượng còn, đơn giá]
         for r in g.itertuples(index=False):
-            if r.type == TX_IN:
+            if r.type in POSITIVE_TYPES:
                 lots.append([r.date, r.quantity, r.unit_price])
                 continue
             need = r.quantity
@@ -154,9 +153,10 @@ def daily_report(products: pd.DataFrame, tx: pd.DataFrame, date: pd.Timestamp) -
 
     df = products.copy()
     df["opening"] = df["id"].map(opening).fillna(0.0).round(3)
-    for col in ("in", "out", "dispose"):
+    for col in ("in", "out", "dispose", "adj_plus", "adj_minus"):
         df[col] = df["id"].map(moved[col] if col in moved.columns else pd.Series(dtype=float)).fillna(0.0)
-    df["closing"] = (df["opening"] + df["in"] - df["out"] - df["dispose"]).round(3)
+    df["adjust"] = (df["adj_plus"] - df["adj_minus"]).round(3)
+    df["closing"] = (df["opening"] + df["in"] - df["out"] - df["dispose"] + df["adjust"]).round(3)
     df["value"] = df["closing"] * df["price"]
     df["sales_value"] = df["out"] * df["price"]
     df["near_qty"] = df["id"].map(near).fillna(0.0)

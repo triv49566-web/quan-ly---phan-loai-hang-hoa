@@ -29,8 +29,13 @@ UNITS = ["kg", "g", "lít", "ml", "gói", "chai", "hộp", "lon", "túi", "quả
 TX_IN = "in"
 TX_OUT = "out"
 TX_DISPOSE = "dispose"          # hủy hàng hết hạn / hư hỏng
-TX_TYPES = [TX_IN, TX_OUT, TX_DISPOSE]
-TX_LABEL = {TX_IN: "Nhập kho", TX_OUT: "Xuất kho", TX_DISPOSE: "Hủy hàng"}
+TX_ADJ_PLUS = "adj_plus"        # kiểm kê: thực tế nhiều hơn sổ
+TX_ADJ_MINUS = "adj_minus"      # kiểm kê: thực tế ít hơn sổ (hao hụt, mất mát)
+TX_TYPES = [TX_IN, TX_OUT, TX_DISPOSE]                       # loại phiếu người dùng tự lập
+ALL_TX_TYPES = TX_TYPES + [TX_ADJ_PLUS, TX_ADJ_MINUS]
+POSITIVE_TYPES = (TX_IN, TX_ADJ_PLUS)                        # làm tăng tồn kho
+TX_LABEL = {TX_IN: "Nhập kho", TX_OUT: "Xuất kho", TX_DISPOSE: "Hủy hàng",
+            TX_ADJ_PLUS: "Kiểm kê: thừa", TX_ADJ_MINUS: "Kiểm kê: thiếu"}
 
 # Phân loại bảo quản theo hạn sử dụng (số ngày kể từ khi nhập)
 LONG_LIFE_DAYS = 90

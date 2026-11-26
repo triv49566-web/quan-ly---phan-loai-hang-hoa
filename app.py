@@ -14,7 +14,7 @@ from src import database as db
 from src import inventory, kpi, risk
 from src.catalog import (
     IN_STOCK, LONG_LIFE, LONG_LIFE_DAYS, LOW_STOCK, OUT_OF_STOCK, SHORT_LIFE, STATUSES, TX_DISPOSE,
-    TX_IN, TX_LABEL, TX_OUT, UNCATEGORIZED, UNITS, ZONE_COLD, ZONE_FROZEN, ZONES, fmt_money, fmt_qty,
+    TX_ADJ_MINUS, TX_ADJ_PLUS, TX_IN, TX_LABEL, TX_OUT, UNCATEGORIZED, UNITS, ZONE_COLD, ZONE_FROZEN, ZONES, fmt_money, fmt_qty,
     storage_class, zone_of,
 )
 
@@ -61,6 +61,9 @@ CSS = """
 .sk-table td b { white-space: nowrap; }
 .sk-table .r { text-align: right; white-space: nowrap; }
 .sk-table .m { color: #4B5B54; white-space: nowrap; }
+.sk-table .nowrap { white-space: nowrap; }
+.sk-table.sk-compact { min-width: 0; }
+.sk-compact th:first-child, .sk-compact td:first-child { padding-left: 8px; }
 .sk-meter { display: flex; flex-direction: column; gap: 6px; min-width: 200px; }
 .sk-meter .top { display: flex; justify-content: space-between; gap: 8px; }
 .sk-bar { position: relative; height: 6px; border-radius: 3px; background: #E7ECE9; }
@@ -79,6 +82,7 @@ CSS = """
 .sk-tag.in { background: #E4F0E8; color: #14532D; }
 .sk-tag.out { background: #E7ECE9; color: #12211C; }
 .sk-tag.dispose { background: #FBE3DF; color: #7F1D13; }
+.sk-tag.adj_plus, .sk-tag.adj_minus { background: #DBEAFE; color: #1E3A8A; }
 .sk-pill.neutral { background: #F3F5F4; color: #12211C; border-color: #B9C4BE; }
 .sk-stat .sk-sub { margin-top: 2px; }
 .sk-stat.out .sk-sub { color: #FBE3DF; }
@@ -109,7 +113,7 @@ i.safe { background: #2F7D53; } i.first { background: #D97706; } i.near { backgr
 .sk-cd.none { color: #9DB8AA; }
 .sk-none { font-size: 12px; color: #9B1C1C; font-weight: 600; }
 .sk-pill.exp { background: #4C0519; color: #fff; border-color: #4C0519; }
-.sk-people { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(440px, 100%), 1fr)); }
+.sk-people { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
 .sk-person { padding: 20px 24px; display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: center; }
 .sk-person .who { flex: 1 1 200px; min-width: 0; }
 .sk-person .av { flex: none; width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 20px; color: #fff; }
@@ -243,7 +247,10 @@ st.logo(LOGO, size="large")
 cats = db.categories_df(conn)
 products = db.products_df(conn)
 tx = db.transactions_df(conn)
+STOCKTAKES = db.stocktakes_df(conn)
 stock = inventory.stock_table(products, tx)
+MY_PIDS = set(products["id"]) if USER["is_admin"] else set(
+    products.loc[products["manager_id"] == USER["id"], "id"])
 stock["category"] = stock["category"].fillna(UNCATEGORIZED)
 stock["storage"] = stock["shelf_life_days"].map(storage_class)
 tx["category"] = tx["category"].fillna(UNCATEGORIZED)
@@ -301,7 +308,7 @@ def plot_layout(fig: go.Figure, title: str, height: int = 340, **kw) -> go.Figur
 def page_stock() -> None:
     n_cats = stock["category"].nunique()
     page_head("Tồn kho", f"Tính đến {AS_OF} · {len(stock)} mặt hàng trong {n_cats} danh mục",
-              (pg_tx, "Ghi nhập / xuất") if USER["is_admin"] else None)
+              (pg_tx, "Ghi nhập / xuất") if USER["can_write"] else None)
 
     counts = {s: int((stock["status"] == s).sum()) for s in STATUSES}
     st.html(f"""
@@ -389,10 +396,14 @@ def page_tx() -> None:
 
     with left, st.container(border=True, key="card2"):
         st.markdown("#### Phiếu mới")
-        if stock.empty:
-            st.info("Chưa có sản phẩm. Hãy thêm ở trang **Sản phẩm & danh mục**.")
+        mine = stock[stock["id"].isin(MY_PIDS)]
+        if mine.empty:
+            st.info("Chưa có sản phẩm nào bạn được giao phụ trách. Nhờ quản trị viên phân công danh mục."
+                    if not USER["is_admin"] else "Chưa có sản phẩm. Hãy thêm ở trang **Sản phẩm & danh mục**.")
             return
-        by_id = stock.sort_values("name").set_index("id")
+        if not USER["is_admin"]:
+            st.caption("Bạn chỉ ghi phiếu được cho các danh mục mình phụ trách.")
+        by_id = mine.sort_values("name").set_index("id")
         tx_type = st.segmented_control("Loại phiếu", [TX_IN, TX_OUT, TX_DISPOSE], default=TX_OUT,
                                        format_func=TX_LABEL.get, label_visibility="collapsed",
                                        width="stretch") or TX_OUT
@@ -428,7 +439,8 @@ def page_tx() -> None:
                      f"kho chỉ còn {fmt_qty(stock_qty)} {unit}.")
         if st.button("Ghi nhận phiếu", type="primary", width="stretch", disabled=over or qty <= 0):
             try:
-                db.add_transaction(conn, int(pid), tx_type, qty, price, tx_date, note)
+                db.add_transaction(conn, int(pid), tx_type, qty, price, tx_date, note,
+                                   created_by=USER["username"])
                 notify(f"Đã ghi: {TX_LABEL[tx_type].lower()} {fmt_qty(qty)} {unit} {p['name']}, "
                        f"thành tiền {fmt_money(qty * price)}.")
                 st.rerun()
@@ -442,7 +454,7 @@ def page_tx() -> None:
         items = []
         for _, t in tx.head(12).iterrows():
             items.append(
-                f'<li><span class="sk-tag {t["type"]}">{ {TX_IN: "Nhập", TX_OUT: "Xuất"}.get(t["type"], "Hủy") }</span>'
+                f'<li><span class="sk-tag {t["type"]}">{ {TX_IN: "Nhập", TX_OUT: "Xuất", TX_DISPOSE: "Hủy"}.get(t["type"], "K.kê") }</span>'
                 f'<div class="g"><b>{escape(t["product"])}</b><span>{t["date"]:%d/%m/%Y} · '
                 f'{fmt_qty(t["quantity"])} {escape(t["unit"])}</span></div>'
                 f'<b style="white-space:nowrap">{fmt_money(t["quantity"] * t["unit_price"])}</b></li>')
@@ -659,7 +671,7 @@ def page_history() -> None:
     with st.container(border=True, key="card11"):
         a, b, c, d = st.columns([2, 1, 1, 2])
         q = a.text_input("Sản phẩm", placeholder="Tìm theo tên")
-        types = b.selectbox("Loại", ["", TX_IN, TX_OUT, TX_DISPOSE],
+        types = b.selectbox("Loại", ["", TX_IN, TX_OUT, TX_DISPOSE, TX_ADJ_PLUS, TX_ADJ_MINUS],
                             format_func=lambda t: "Tất cả" if not t else TX_LABEL[t])
         cat = c.selectbox("Danh mục", [""] + sorted(tx["category"].unique()),
                           format_func=lambda x: x or "Tất cả")
@@ -686,6 +698,7 @@ def page_history() -> None:
             "Đơn giá": h["unit_price"],
             "Thành tiền": h["quantity"] * h["unit_price"],
             "Ghi chú": h["note"],
+            "Người lập": h["created_by"].fillna(""),
         })
         st.dataframe(out, hide_index=True, width="stretch", height=520, column_config={
             "Số lượng": st.column_config.NumberColumn(format="localized"),
@@ -704,8 +717,7 @@ def page_history() -> None:
 
 
 def page_account() -> None:
-    page_head("Tài khoản", f"{USER['full_name']} · {USER['username']}"
-              + (" · quản trị viên" if USER["is_admin"] else ""))
+    page_head("Tài khoản", f"{USER['full_name']} · {USER['username']} · {auth.ROLE_LABEL[USER['role']]}")
     left, right = st.columns([1, 1], gap="large")
 
     with left, st.container(border=True, key="card_pw"):
@@ -733,11 +745,12 @@ def page_account() -> None:
             username = st.text_input("Tên tài khoản", placeholder="ví dụ: nhanvien1")
             pw = st.text_input("Mật khẩu", type="password", autocomplete="new-password",
                                help=f"Ít nhất {auth.MIN_PASSWORD} ký tự. Người dùng tự đổi sau khi đăng nhập.")
-            is_admin = st.checkbox("Quản trị viên (được sửa dữ liệu và quản lý tài khoản)",
-                                   help="Bỏ trống: tài khoản nhân viên, chỉ được xem Tồn kho, Báo cáo, Lịch sử.")
+            role = st.selectbox("Vai trò", auth.ROLES, index=1, format_func=auth.ROLE_LABEL.get,
+                                help="Quản lý kho: ghi phiếu và kiểm kê cho danh mục được giao, được chấm KPI. "
+                                     "Chỉ xem: xem tồn kho, báo cáo, lịch sử.")
             if st.form_submit_button("Thêm tài khoản", type="primary", icon=":material/person_add:"):
                 try:
-                    auth.create_user(conn, username, pw, name, is_admin=is_admin)
+                    auth.create_user(conn, username, pw, name, role=role)
                     notify(f"Đã thêm tài khoản “{auth.normalize_username(username)}”.")
                     st.rerun()
                 except ValueError as e:
@@ -748,7 +761,7 @@ def page_account() -> None:
         users = auth.users_df(conn)
         st.dataframe(pd.DataFrame({
             "Tài khoản": users["username"], "Họ tên": users["full_name"],
-            "Vai trò": users["is_admin"].map({1: "Quản trị viên", 0: "Nhân viên (chỉ xem)"}),
+            "Vai trò": users["role"].map(auth.ROLE_LABEL),
             "Ngày tạo": users["created_at"],
         }), hide_index=True, width="stretch")
 
@@ -759,6 +772,17 @@ def page_account() -> None:
         a, b = st.columns(2, vertical_alignment="bottom")
         uid = a.selectbox("Chọn tài khoản", by_id.index.tolist(),
                           format_func=lambda i: f"{by_id.at[i, 'username']} — {by_id.at[i, 'full_name'] or ''}")
+        with b.popover("Đổi vai trò", icon=":material/badge:"):
+            cur_role = by_id.at[uid, "role"]
+            new_role = st.selectbox("Vai trò mới", auth.ROLES, index=auth.ROLES.index(cur_role),
+                                    format_func=auth.ROLE_LABEL.get, key=f"role_{uid}")
+            if st.button("Lưu vai trò", type="primary", key=f"save_role_{uid}"):
+                try:
+                    auth.set_role(conn, int(uid), new_role, USER["id"])
+                    notify(f"Đã đổi vai trò “{by_id.at[uid, 'username']}” thành {auth.ROLE_LABEL[new_role]}.")
+                    st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
         with b.popover("Đặt lại mật khẩu", icon=":material/key:"):
             with st.form(f"reset_{uid}", border=False):
                 newpw = st.text_input("Mật khẩu mới", type="password", autocomplete="new-password")
@@ -786,8 +810,9 @@ GRADE_COLOR = {"A": "#2F7D53", "B": "#1D4ED8", "C": "#B45309", "D": "#7F1D13"}
 
 
 @st.cache_data(show_spinner="Đang tính KPI theo quý...")
-def cached_quarterly(products_: pd.DataFrame, tx_: pd.DataFrame) -> pd.DataFrame:
-    return kpi.quarterly_table(products_, tx_)
+def cached_quarterly(products_: pd.DataFrame, tx_: pd.DataFrame,
+                     counts_: pd.DataFrame | None = None) -> pd.DataFrame:
+    return kpi.quarterly_table(products_, tx_, counts_)
 
 
 @st.cache_data(show_spinner=False)
@@ -807,11 +832,12 @@ def stat_cards(items: list[tuple]) -> None:
     st.html(f'<section class="sk-stats">{html}</section>')
 
 
-def html_table(head: list[str], rows: list[str], right: set[int] = frozenset(), empty: str = "Không có dữ liệu.") -> None:
+def html_table(head: list[str], rows: list[str], right: set[int] = frozenset(), empty: str = "Không có dữ liệu.",
+               cls: str = "") -> None:
     th = "".join(f'<th class="{"r" if i in right else ""}">{h}</th>' for i, h in enumerate(head))
     body = "".join(rows)
     tail = "" if rows else f'<p class="sk-empty">{escape(empty)}</p>'
-    st.html(f'<div class="sk-wrap"><table class="sk-table"><thead><tr>{th}</tr></thead>'
+    st.html(f'<div class="sk-wrap"><table class="sk-table {cls}"><thead><tr>{th}</tr></thead>'
             f'<tbody>{body}</tbody></table>{tail}</div>')
 
 
@@ -846,7 +872,7 @@ def page_daily() -> None:
                                     label_visibility="collapsed") or "Tất cả"
         view = rep
         if only == "Có phát sinh":
-            view = rep[(rep["in"] + rep["out"] + rep["dispose"]) > 0]
+            view = rep[(rep["in"] + rep["out"] + rep["dispose"] + rep["adjust"].abs()) > 0]
         elif only == "Cần chú ý":
             view = rep[(rep["status"] != IN_STOCK) | (rep["near_qty"] > 0)]
         rows = []
@@ -859,20 +885,21 @@ def page_daily() -> None:
                 f'<td>{tag(storage_class(r["shelf_life_days"]), "neutral")}</td>'
                 f'<td class="r">{fmt_qty(r["opening"])} {u}</td><td class="r">{fmt_qty(r["in"])}</td>'
                 f'<td class="r">{fmt_qty(r["out"])}</td><td class="r">{fmt_qty(r["dispose"])}</td>'
+                f'<td class="r">{("+" if r["adjust"] > 0 else "") + fmt_qty(r["adjust"]) if r["adjust"] else "0"}</td>'
                 f'<td class="r"><b>{fmt_qty(r["closing"])} {u}</b></td>'
                 f'<td class="r">{left}{near_txt}</td><td>{pill(r["status"])}</td></tr>')
-        html_table(["Sản phẩm", "Bảo quản", "Tồn đầu ngày", "Nhập", "Xuất", "Hủy", "Tồn cuối ngày",
-                    "Lô gần hết hạn", "Trạng thái"], rows, right={2, 3, 4, 5, 6, 7},
+        html_table(["Sản phẩm", "Bảo quản", "Tồn đầu ngày", "Nhập", "Xuất", "Hủy", "Kiểm kê ±",
+                    "Tồn cuối ngày", "Lô gần hết hạn", "Trạng thái"], rows, right={2, 3, 4, 5, 6, 7, 8},
                    empty="Không có mặt hàng nào khớp.")
         export = view[["name", "category", "unit", "shelf_life_days", "opening", "in", "out", "dispose",
-                       "closing", "value", "near_qty", "days_left", "status"]]
+                       "adjust", "closing", "value", "near_qty", "days_left", "status"]]
         st.download_button("Tải báo cáo ngày (CSV)", export.to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"bao_cao_ngay_{day:%Y%m%d}.csv", mime="text/csv",
                            icon=":material/download:")
 
 
 def page_kpi() -> None:
-    q = cached_quarterly(products, tx)
+    q = cached_quarterly(products, tx, STOCKTAKES)
     if q.empty:
         page_head("Đánh giá KPI", "Chưa có dữ liệu.")
         return
@@ -971,7 +998,7 @@ def page_kpi() -> None:
 
     with st.container(border=True, key="card_kpi_plan"):
         st.markdown(f"#### Phương án cải tiến cho {sel}")
-        plans = kpi.improvement_plan(products, tx, row, prev, cached_daily(products, tx))
+        plans = kpi.improvement_plan(products, tx, row, prev, cached_daily(products, tx), STOCKTAKES)
         if not plans:
             st.success("Tất cả chỉ số đều đạt và không xấu đi so với quý trước. Duy trì quy trình hiện tại.")
         rows = []
@@ -1222,7 +1249,7 @@ def page_kpi_managers() -> None:
     if not USER["is_admin"]:
         groups = {k: v for k, v in groups.items() if k == USER["id"]}
 
-    q_all = cached_quarterly(products, tx)
+    q_all = cached_quarterly(products, tx, STOCKTAKES)
     if q_all.empty:
         page_head("KPI người quản lý kho", "Chưa có dữ liệu.")
         return
@@ -1246,12 +1273,13 @@ def page_kpi_managers() -> None:
     for uid, g in groups.items():
         pids = products.loc[products["category"].isin(g["cats"]), "id"]
         p_sub, t_sub = products[products["id"].isin(pids)], tx[tx["product_id"].isin(pids)]
-        q = cached_quarterly(p_sub, t_sub)
+        c_sub = STOCKTAKES[STOCKTAKES["product_id"].isin(pids)]
+        q = cached_quarterly(p_sub, t_sub, c_sub)
         if sel not in q.index:
             continue
         j = list(q.index).index(sel)
         data[uid] = dict(g, q=q, row=q.loc[sel], prev=q.iloc[j - 1] if j > 0 else None,
-                         products=p_sub, tx=t_sub, n=len(p_sub))
+                         products=p_sub, tx=t_sub, counts=c_sub, n=len(p_sub))
     if not data:
         st.info("Các danh mục được giao chưa có dữ liệu trong quý này.")
         return
@@ -1277,6 +1305,8 @@ def page_kpi_managers() -> None:
             delta = row["score"] - prev["score"]
             chips.append(f'<span class="sk-pill {"ok" if delta > 0 else "out" if delta < 0 else "neutral"}">'
                          f'{"▲ +" if delta > 0 else "▼ " if delta < 0 else ""}{delta:.0f} điểm so với {periods[i - 1].split(" ")[0]}</span>')
+        if row["counts"]:
+            chips.append(f'<span class="sk-pill neutral">Kiểm kê: {int(row["counts_ok"])} / {int(row["counts"])} lần khớp sổ</span>')
         first_q = d["q"].iloc[0]
         if len(d["q"]) > 1:
             chips.append(f'<span class="sk-pill neutral">{d["q"].index[0].split(" ")[0]}: {first_q["score"]:.0f} '
@@ -1339,7 +1369,7 @@ def page_kpi_managers() -> None:
         for u in sorted(order, key=lambda u: data[u]["row"]["score"]):
             d = data[u]
             plans = kpi.improvement_plan(d["products"], d["tx"], d["row"], d["prev"],
-                                         cached_daily(d["products"], d["tx"]))
+                                         cached_daily(d["products"], d["tx"]), d["counts"])
             if not plans:
                 rows.append(f'<tr><td><b>{escape(d["name"] or "")}</b><br>{tag("Theo dõi", "neutral")}</td>'
                             f'<td>Tất cả chỉ số đạt và không xấu đi. Duy trì cách làm hiện tại.</td></tr>')
@@ -1351,6 +1381,77 @@ def page_kpi_managers() -> None:
                         f'<td><b>{escape(p["label"])}</b>{items}: {escape(p["action"])}{others}</td></tr>')
         html_table(["Người", "Việc cần làm"], rows)
         st.caption("Người quản lý chỉ thấy KPI của mình; quản trị viên xem được bảng xếp hạng cả kho.")
+
+
+def page_count() -> None:
+    page_head("Kiểm kê", "Đếm số lượng thực tế và đối chiếu với sổ sách. Lệch sổ thì web tự lập phiếu điều chỉnh "
+                         "để tồn kho khớp thực tế; kết quả tính vào KPI độ chính xác tồn kho.")
+    mine = stock[stock["id"].isin(MY_PIDS)].sort_values("name")
+    counts = STOCKTAKES[STOCKTAKES["product_id"].isin(MY_PIDS)]
+    if mine.empty:
+        st.info("Chưa có sản phẩm nào bạn được giao phụ trách. Nhờ quản trị viên phân công danh mục.")
+        return
+    q_now = pd.Timestamp(dt.date.today()).to_period("Q") if counts.empty else counts["date"].max().to_period("Q")
+    cq = counts[counts["date"].dt.to_period("Q") == q_now]
+    acc, ok, n = kpi.accuracy_of(cq, q_now.start_time, q_now.end_time)
+    miss = counts[counts["diff"].abs() > counts["book_qty"].abs() * kpi.COUNT_TOLERANCE + 1e-9]
+    loss = float((-miss["diff"].clip(upper=0) * miss["price"]).sum())
+    d = kpi.KPI_DEFS["accuracy"]
+    stat_cards([
+        (f"Độ chính xác Q{q_now.quarter}/{q_now.year}", f"{acc:.0f}%".replace(".", ","),
+         "" if acc >= d["target"] else "low" if acc >= d["warn"] else "out", f"tiêu chuẩn ≥ {d['target']}%"),
+        ("Lần kiểm kê trong quý", f"{n}", "", f"{ok} lần khớp sổ"),
+        ("Lần lệch sổ (tất cả)", f"{len(miss)}", "low" if len(miss) else "", f"trên {len(counts)} lần kiểm kê"),
+        ("Giá trị hao hụt qua kiểm kê", fmt_money(loss), "out" if loss else "", "hàng thiếu so với sổ"),
+    ])
+
+    left, right = st.columns([1, 1.4], gap="large")
+    with left, st.container(border=True, key="card_count_form"):
+        st.markdown("#### Phiếu kiểm kê")
+        by_id = mine.set_index("id")
+        pid = st.selectbox("Sản phẩm", by_id.index.tolist(),
+                           format_func=lambda i: f"{by_id.at[i, 'name']} — sổ: {fmt_qty(by_id.at[i, 'quantity'])} "
+                                                 f"{by_id.at[i, 'unit']}", key="count_pid")
+        p = by_id.loc[pid]
+        book = float(p["quantity"])
+        a, b = st.columns(2)
+        counted = a.number_input(f"Đếm thực tế ({p['unit']})", min_value=0.0, value=book, format="%g",
+                                 step=1.0 if p["unit"] in COUNT_UNITS else 0.1, key=f"count_{pid}")
+        day = b.date_input("Ngày kiểm kê", value=dt.date.today(), format="DD/MM/YYYY", key="count_day")
+        note = st.text_input("Ghi chú", placeholder="Ví dụ: kiểm kê cuối tháng, hàng rơi vỡ", key="count_note")
+        diff = round(counted - book, 3)
+        cls = "" if abs(diff) <= abs(book) * kpi.COUNT_TOLERANCE + 1e-9 else "bad"
+        st.html(f"""<dl class="sk-preview">
+<div><dt>Tồn trên sổ</dt><dd>{fmt_qty(book)} {escape(p['unit'])}</dd></div>
+<div><dt>Chênh lệch</dt><dd class="{cls}">{"+" if diff > 0 else ""}{fmt_qty(diff)} {escape(p['unit'])}</dd></div>
+<div><dt>Giá trị chênh lệch</dt><dd class="{cls}">{fmt_money(diff * float(p['price']))}</dd></div></dl>""")
+        if st.button("Ghi kết quả kiểm kê", type="primary", width="stretch"):
+            try:
+                d_ = db.add_stocktake(conn, int(pid), counted, day, note, created_by=USER["username"])
+                msg = "khớp sổ sách" if abs(d_) < 1e-9 else f"lệch {'+' if d_ > 0 else ''}{fmt_qty(d_)} {p['unit']}, đã lập phiếu điều chỉnh"
+                notify(f"Đã ghi kiểm kê {p['name']}: {msg}.")
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+    with right, st.container(border=True, key="card_count_list"):
+        h_, t_ = st.columns([3, 2], vertical_alignment="center")
+        h_.markdown("#### Kiểm kê gần đây")
+        only_off = t_.toggle("Chỉ xem lần lệch sổ", key="count_only_off")
+        shown = counts
+        if only_off:
+            shown = counts[(counts["diff"].abs() > counts["book_qty"].abs() * kpi.COUNT_TOLERANCE + 1e-9)]
+        rows = []
+        for _, r in shown.head(15).iterrows():
+            off = abs(r["diff"]) > abs(r["book_qty"]) * kpi.COUNT_TOLERANCE + 1e-9
+            dtxt = (f'{"+" if r["diff"] > 0 else ""}{fmt_qty(r["diff"])}' if r["diff"] else "0")
+            rows.append(f'<tr><td class="nowrap">{r["date"]:%d/%m/%Y}</td>'
+                        f'<td><b>{escape(r["product"])}</b><br><span class="sk-sub">sổ {fmt_qty(r["book_qty"])} · '
+                        f'thực tế {fmt_qty(r["counted_qty"])} {escape(r["unit"])} · {escape(r["created_by"] or "")}</span></td>'
+                        f'<td class="r">{dtxt}</td>'
+                        f'<td>{tag("Lệch sổ", "out") if off else tag("Khớp", "ok")}</td></tr>')
+        html_table(["Ngày", "Sản phẩm · người kiểm", "Chênh lệch", "Kết quả"], rows,
+                   right={2}, empty="Chưa có lần kiểm kê nào.", cls="sk-compact")
 
 
 pg_stock = st.Page(page_stock, title="Tồn kho", icon=":material/inventory_2:",
@@ -1367,7 +1468,7 @@ pg_account = st.Page(page_account, title="Tài khoản", icon=":material/manage_
 
 with st.sidebar:
     st.caption(f"Đang đăng nhập: **{USER['full_name']}** ({USER['username']})"
-               + (" · quản trị" if USER["is_admin"] else " · nhân viên, chỉ xem"))
+               + f" · {auth.ROLE_LABEL[USER['role']].lower()}")
     if st.button("Đăng xuất", icon=":material/logout:"):
         st.session_state.clear()
         st.rerun()
@@ -1380,10 +1481,15 @@ pg_storage = st.Page(page_storage, title="Thời hạn bảo quản", icon=":mat
                      url_path="thoi-han-bao-quan")
 pg_risk = st.Page(page_risk, title="Quản lý rủi ro", icon=":material/warning:", url_path="rui-ro")
 
+pg_count = st.Page(page_count, title="Kiểm kê", icon=":material/fact_check:", url_path="kiem-ke")
+
 reports = [pg_daily, pg_kpi_mgr, pg_kpi, pg_report, pg_risk]
 if USER["is_admin"]:
-    pages = {"Kho hàng": [pg_stock, pg_storage, pg_tx, pg_products, pg_history], "Báo cáo & đánh giá": reports,
-             "Hệ thống": [pg_account]}
+    pages = {"Kho hàng": [pg_stock, pg_storage, pg_tx, pg_count, pg_products, pg_history],
+             "Báo cáo & đánh giá": reports, "Hệ thống": [pg_account]}
+elif USER["can_write"]:
+    pages = {"Kho hàng": [pg_stock, pg_storage, pg_tx, pg_count, pg_history],
+             "Báo cáo & đánh giá": reports, "Hệ thống": [pg_account]}
 else:
     pages = {"Kho hàng": [pg_stock, pg_storage, pg_history], "Báo cáo & đánh giá": reports,
              "Hệ thống": [pg_account]}

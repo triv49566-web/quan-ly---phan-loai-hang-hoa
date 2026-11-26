@@ -19,6 +19,11 @@ import pandas as pd
 
 ITERATIONS = 240_000
 MIN_PASSWORD = 6
+
+# Vai trò: quản trị viên / quản lý kho (ghi phiếu, kiểm kê cho danh mục được giao) / chỉ xem
+ROLE_ADMIN, ROLE_MANAGER, ROLE_VIEWER = "admin", "manager", "viewer"
+ROLES = [ROLE_ADMIN, ROLE_MANAGER, ROLE_VIEWER]
+ROLE_LABEL = {ROLE_ADMIN: "Quản trị viên", ROLE_MANAGER: "Quản lý kho", ROLE_VIEWER: "Nhân viên (chỉ xem)"}
 # Chữ không dấu, số, . _ -  và dấu cách ở giữa (ví dụ: "nhan vien 1")
 USERNAME_RE = re.compile(r"^[a-z0-9_.-]+( [a-z0-9_.-]+)*$")
 
@@ -29,6 +34,7 @@ CREATE TABLE IF NOT EXISTS users (
     full_name     TEXT DEFAULT '',
     password_hash TEXT NOT NULL,   -- dạng: pbkdf2_sha256$<vòng>$<salt hex>$<hash hex>
     is_admin      INTEGER NOT NULL DEFAULT 0,
+    role          TEXT NOT NULL DEFAULT 'viewer',
     created_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 """
@@ -37,6 +43,10 @@ CREATE TABLE IF NOT EXISTS users (
 def init(conn: sqlite3.Connection) -> None:
     with conn:
         conn.executescript(SCHEMA)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+        if "role" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'")
+            conn.execute("UPDATE users SET role = 'admin' WHERE is_admin = 1")
 
 
 # ---------------------------------------------------------------------------
@@ -96,18 +106,22 @@ def count_users(conn: sqlite3.Connection) -> int:
 
 def users_df(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(
-        "SELECT id, username, full_name, is_admin, created_at FROM users ORDER BY username", conn)
+        "SELECT id, username, full_name, is_admin, role, created_at FROM users ORDER BY username", conn)
 
 
 def create_user(conn: sqlite3.Connection, username: str, password: str, full_name: str = "",
-                is_admin: bool = False, confirm: str | None = None) -> int:
+                is_admin: bool = False, confirm: str | None = None, role: str | None = None) -> int:
     u = _check_username(username)
     _check_new_password(password, confirm)
+    role = role or (ROLE_ADMIN if is_admin else ROLE_VIEWER)
+    if role not in ROLES:
+        raise ValueError("Vai trò không hợp lệ.")
+    is_admin = role == ROLE_ADMIN
     try:
         with conn:
             cur = conn.execute(
-                "INSERT INTO users(username, full_name, password_hash, is_admin) VALUES (?, ?, ?, ?)",
-                (u, (full_name or "").strip(), hash_password(password), int(bool(is_admin))))
+                "INSERT INTO users(username, full_name, password_hash, is_admin, role) VALUES (?, ?, ?, ?, ?)",
+                (u, (full_name or "").strip(), hash_password(password), int(bool(is_admin)), role))
     except sqlite3.IntegrityError:
         raise ValueError(f"Tài khoản “{u}” đã tồn tại.") from None
     return cur.lastrowid
@@ -115,24 +129,42 @@ def create_user(conn: sqlite3.Connection, username: str, password: str, full_nam
 
 def authenticate(conn: sqlite3.Connection, username: str, password: str) -> dict | None:
     """Trả về thông tin tài khoản nếu đúng tên & mật khẩu, ngược lại None."""
-    row = conn.execute("SELECT id, username, full_name, password_hash, is_admin FROM users "
+    row = conn.execute("SELECT id, username, full_name, password_hash, is_admin, role FROM users "
                        "WHERE username = ?", (normalize_username(username),)).fetchone()
     if row is None:
         check_password(password or "", _DUMMY_HASH)
         return None
     if not check_password(password or "", row["password_hash"]):
         return None
-    return {"id": row["id"], "username": row["username"],
-            "full_name": row["full_name"] or row["username"], "is_admin": bool(row["is_admin"])}
+    return _user_dict(row)
+
+
+def _user_dict(row) -> dict:
+    return {"id": row["id"], "username": row["username"], "full_name": row["full_name"] or row["username"],
+            "is_admin": bool(row["is_admin"]), "role": row["role"],
+            "can_write": row["role"] in (ROLE_ADMIN, ROLE_MANAGER)}
+
+
+def set_role(conn: sqlite3.Connection, user_id: int, role: str, acting_user_id: int) -> None:
+    if role not in ROLES:
+        raise ValueError("Vai trò không hợp lệ.")
+    row = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        raise ValueError("Tài khoản không tồn tại.")
+    if row["role"] == ROLE_ADMIN and role != ROLE_ADMIN:
+        if user_id == acting_user_id:
+            raise ValueError("Không thể tự bỏ quyền quản trị của chính mình.")
+        if count_admins(conn) <= 1:
+            raise ValueError("Phải còn ít nhất một tài khoản quản trị.")
+    with conn:
+        conn.execute("UPDATE users SET role = ?, is_admin = ? WHERE id = ?",
+                     (role, int(role == ROLE_ADMIN), user_id))
 
 
 def get_user(conn: sqlite3.Connection, user_id: int) -> dict | None:
-    row = conn.execute("SELECT id, username, full_name, is_admin FROM users WHERE id = ?",
+    row = conn.execute("SELECT id, username, full_name, is_admin, role FROM users WHERE id = ?",
                        (user_id,)).fetchone()
-    if row is None:
-        return None
-    return {"id": row["id"], "username": row["username"],
-            "full_name": row["full_name"] or row["username"], "is_admin": bool(row["is_admin"])}
+    return None if row is None else _user_dict(row)
 
 
 def change_password(conn: sqlite3.Connection, user_id: int, old: str, new: str, confirm: str) -> None:
@@ -184,6 +216,9 @@ def sync_from_secrets(conn: sqlite3.Connection, cfg) -> list[str]:
     [auth.staff]                 # tài khoản nhân viên (chỉ xem): "tên" = "mật khẩu"
     "nhan vien 1" = "..."
 
+    [auth.managers]              # tài khoản quản lý kho: "tên" = "mật khẩu"
+    "nhan vien 3" = "..."
+
     Tài khoản đã tồn tại thì giữ nguyên (không ghi đè mật khẩu người dùng đã tự đổi).
     Trả về danh sách tài khoản vừa tạo.
     """
@@ -194,8 +229,14 @@ def sync_from_secrets(conn: sqlite3.Connection, cfg) -> list[str]:
     if admin_user and admin_pw and not user_exists(conn, admin_user):
         create_user(conn, admin_user, str(admin_pw), full_name="Quản trị viên", is_admin=True)
         created.append(normalize_username(admin_user))
-    for username, pw in dict(cfg.get("staff", {}) or {}).items():
-        if not user_exists(conn, username):
-            create_user(conn, username, str(pw), full_name=" ".join(str(username).split()).title())
-            created.append(normalize_username(username))
+    for key, role in (("staff", ROLE_VIEWER), ("managers", ROLE_MANAGER)):
+        for username, pw in dict(cfg.get(key, {}) or {}).items():
+            if not user_exists(conn, username):
+                create_user(conn, username, str(pw), full_name=" ".join(str(username).split()).title(),
+                            role=role)
+                created.append(normalize_username(username))
+            elif role == ROLE_MANAGER:
+                conn.execute("UPDATE users SET role = ? WHERE username = ? AND role = ?",
+                             (ROLE_MANAGER, normalize_username(username), ROLE_VIEWER))
+                conn.commit()
     return created
