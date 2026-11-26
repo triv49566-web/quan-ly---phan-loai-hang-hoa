@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Ứng dụng web quản lý & phân loại hàng hóa nhu yếu phẩm (sữa, gạo, muối,
-tiêu, dầu ăn, bột ngọt, ...). Giao diện "Sổ Kho".
-
-Chạy:  streamlit run app.py
-"""
-
 from __future__ import annotations
 
 import datetime as dt
@@ -26,14 +18,11 @@ from src.catalog import (
     storage_class, zone_of,
 )
 
-# ---------------------------------------------------------------------------
-# Thiết lập trang & bảng màu (theo bản thiết kế)
-# ---------------------------------------------------------------------------
 st.set_page_config(page_title="Sổ Kho", page_icon=":material/inventory_2:", layout="wide")
 
 ACCENT = "#14532D"
 INK, MUTED, LINE = "#12211C", "#4B5B54", "#DCE3DF"
-OUT_COLOR = "#B45309"          # màu "Xuất kho" trên biểu đồ
+OUT_COLOR = "#B45309"
 FONT = "Be Vietnam Pro, Segoe UI, sans-serif"
 STATUS_CLS = {IN_STOCK: "ok", LOW_STOCK: "low", OUT_OF_STOCK: "out"}
 STATUS_BAR = {IN_STOCK: "#2F7D53", LOW_STOCK: "#B45309", OUT_OF_STOCK: "#7F1D13"}
@@ -139,10 +128,9 @@ i.safe { background: #2F7D53; } i.first { background: #D97706; } i.near { backgr
 
 
 def _secret_auth() -> dict:
-    """Mục [auth] trong .streamlit/secrets.toml (hoặc Settings → Secrets trên Streamlit Cloud)."""
     try:
         return st.secrets.get("auth", {}) or {}
-    except Exception:  # chưa có file secrets
+    except Exception:
         return {}
 
 
@@ -162,7 +150,6 @@ st.html(CSS)
 
 
 def notify(msg: str, icon: str = ":material/check_circle:") -> None:
-    """Lưu thông báo để hiển thị sau khi trang tải lại."""
     st.session_state["_flash"] = (msg, icon)
 
 
@@ -171,10 +158,7 @@ if "_flash" in st.session_state:
     st.toast(_msg, icon=_icon)
 
 
-# ===========================================================================
-# ĐĂNG NHẬP
-# ===========================================================================
-MAX_TRIES = 5          # sai quá số lần này thì phải chờ
+MAX_TRIES = 5
 LOCK_SECONDS = 60
 LOGO_DARK = """<svg aria-hidden="true" width="40" height="40" viewBox="0 0 32 32" fill="none"
 stroke="#14532D" stroke-width="2" stroke-linejoin="round"><path d="M4 11 16 5l12 6v11l-12 6-12-6z"/>
@@ -270,9 +254,6 @@ names_by_id = dict(zip(products["id"], products["name"]))
 AS_OF = f"{tx['date'].max():%d/%m/%Y}" if not tx.empty else "–"
 
 
-# ---------------------------------------------------------------------------
-# Hàm vẽ dùng chung
-# ---------------------------------------------------------------------------
 def page_head(title: str, subtitle: str, link: tuple | None = None) -> None:
     if link:
         left, right = st.columns([2, 1], vertical_alignment="bottom")
@@ -299,7 +280,6 @@ def days_text(r) -> str:
 
 
 def expiry_note(pid: int) -> str:
-    """Ghi chú lô gần hết hạn nhất của một mặt hàng (đang còn trong kho)."""
     if pid not in NEAREST.index:
         return ""
     left = int(NEAREST[pid])
@@ -309,7 +289,6 @@ def expiry_note(pid: int) -> str:
 
 
 def plot_layout(fig: go.Figure, title: str, height: int = 340, **kw) -> go.Figure:
-    """Tiêu đề in bằng st.markdown (tự xuống dòng), chú thích nằm dưới biểu đồ."""
     st.markdown(f"#### {title}")
     fig.update_layout(height=height, font=dict(family=FONT, color=INK), plot_bgcolor="#FFFFFF",
                       paper_bgcolor="#FFFFFF", margin=dict(l=8, r=8, t=8, b=8),
@@ -319,9 +298,6 @@ def plot_layout(fig: go.Figure, title: str, height: int = 340, **kw) -> go.Figur
     return fig
 
 
-# ===========================================================================
-# TRANG 1 – TỒN KHO
-# ===========================================================================
 def page_stock() -> None:
     n_cats = stock["category"].nunique()
     page_head("Tồn kho", f"Tính đến {AS_OF} · {len(stock)} mặt hàng trong {n_cats} danh mục",
@@ -406,9 +382,6 @@ bình quân mỗi ngày trong {inventory.WINDOW_DAYS} ngày gần nhất.</p>"""
                            file_name="ton_kho.csv", mime="text/csv", icon=":material/download:")
 
 
-# ===========================================================================
-# TRANG 2 – NHẬP / XUẤT KHO
-# ===========================================================================
 def page_tx() -> None:
     page_head("Nhập / Xuất kho",
               "Mỗi phiếu ghi một lần hàng vào hoặc ra khỏi kho. Tồn kho tự tính lại theo phiếu.")
@@ -477,9 +450,6 @@ def page_tx() -> None:
                 if items else '<p class="sk-empty">Chưa có giao dịch.</p>')
 
 
-# ===========================================================================
-# TRANG 3 – SẢN PHẨM & DANH MỤC
-# ===========================================================================
 cat_options = [None] + cats["id"].tolist()
 cat_name_of = dict(zip(cats["id"], cats["name"]))
 
@@ -614,9 +584,6 @@ def page_products() -> None:
                 st.rerun()
 
 
-# ===========================================================================
-# TRANG 4 – BÁO CÁO
-# ===========================================================================
 def page_report() -> None:
     page_head("Báo cáo", f"Số liệu tính đến {AS_OF}.")
     if stock.empty:
@@ -684,9 +651,6 @@ def page_report() -> None:
                                     yaxis_title="đ"), width="stretch")
 
 
-# ===========================================================================
-# TRANG 5 – LỊCH SỬ GIAO DỊCH
-# ===========================================================================
 def page_history() -> None:
     if tx.empty:
         page_head("Lịch sử giao dịch", "Chưa có giao dịch.")
@@ -739,9 +703,6 @@ def page_history() -> None:
                                        f"Xuất {fmt_money(total_out)}")
 
 
-# ===========================================================================
-# TRANG 6 – TÀI KHOẢN
-# ===========================================================================
 def page_account() -> None:
     page_head("Tài khoản", f"{USER['full_name']} · {USER['username']}"
               + (" · quản trị viên" if USER["is_admin"] else ""))
@@ -818,9 +779,6 @@ def page_account() -> None:
                 st.error(str(e))
 
 
-# ===========================================================================
-# PHẦN DÙNG CHUNG CHO BÁO CÁO / KPI / RỦI RO
-# ===========================================================================
 KPI_CLS = {kpi.GOOD: "ok", kpi.WARN: "low", kpi.BAD: "out"}
 RISK_CLS = {risk.HIGH: "out", risk.MEDIUM: "low", risk.LOW: "neutral"}
 PRIORITY_CLS = {"Cao": "out", "Trung bình": "low", "Theo dõi": "neutral"}
@@ -842,7 +800,6 @@ def tag(text: str, cls: str) -> str:
 
 
 def stat_cards(items: list[tuple]) -> None:
-    """items: (nhãn, giá trị, lớp màu '' | 'low' | 'out', ghi chú nhỏ)."""
     html = "".join(
         f'<div class="sk-stat {cls}"><span class="l">{escape(label)}</span>'
         f'<span class="v">{value}</span>{f"<span class=sk-sub>{note}</span>" if note else ""}</div>'
@@ -858,9 +815,6 @@ def html_table(head: list[str], rows: list[str], right: set[int] = frozenset(), 
             f'<tbody>{body}</tbody></table>{tail}</div>')
 
 
-# ===========================================================================
-# TRANG – BÁO CÁO CUỐI NGÀY
-# ===========================================================================
 def page_daily() -> None:
     if tx.empty:
         page_head("Báo cáo cuối ngày", "Chưa có giao dịch.")
@@ -917,9 +871,6 @@ def page_daily() -> None:
                            icon=":material/download:")
 
 
-# ===========================================================================
-# TRANG – ĐÁNH GIÁ KPI (BÁO CÁO THEO QUÝ)
-# ===========================================================================
 def page_kpi() -> None:
     q = cached_quarterly(products, tx)
     if q.empty:
@@ -951,7 +902,6 @@ def page_kpi() -> None:
          "out" if n[kpi.BAD] else "low" if n[kpi.WARN] else "", None),
     ])
 
-    # --- Bảng KPI: Tiêu chí → Chỉ số → Kết quả / Tiêu chuẩn / Đánh giá / Cải thiện
     with st.container(border=True, key="card_kpi_table"):
         st.markdown(f"#### Kết quả {sel}")
         rows = []
@@ -988,7 +938,6 @@ def page_kpi() -> None:
                 for k, d in kpi.KPI_DEFS.items()]
         html_table(["Tiêu chí", "Chỉ số", "Công thức", "Tiêu chuẩn", "Trọng số", "Nguồn dữ liệu"], rows, right={4})
 
-    # --- Biểu đồ
     a, b = st.columns(2)
     with a, st.container(border=True, key="card_kpi_score"):
         colors = [GRADE_COLOR[g] for g in q["grade"]]
@@ -1020,7 +969,6 @@ def page_kpi() -> None:
                       annotation_position="bottom left")
         st.plotly_chart(plot_layout(fig, f"Xu hướng: {d['label']}", yaxis_title=d["unit"]), width="stretch")
 
-    # --- Phương án cải tiến
     with st.container(border=True, key="card_kpi_plan"):
         st.markdown(f"#### Phương án cải tiến cho {sel}")
         plans = kpi.improvement_plan(products, tx, row, prev, cached_daily(products, tx))
@@ -1042,9 +990,6 @@ def page_kpi() -> None:
                        file_name="kpi_theo_quy.csv", mime="text/csv", icon=":material/download:")
 
 
-# ===========================================================================
-# TRANG – QUẢN LÝ RỦI RO
-# ===========================================================================
 def page_risk() -> None:
     if tx.empty:
         page_head("Quản lý rủi ro", "Chưa có giao dịch.")
@@ -1073,7 +1018,7 @@ def page_risk() -> None:
         for _, r in reg.iterrows():
             grid[int(r["impact"]) - 1][int(r["likelihood"]) - 1] += 1
         score = [[(li + 1) * (im + 1) for li in range(5)] for im in range(5)]
-        z = [[0 if v < 8 else 1 if v < 15 else 2 for v in r_] for r_ in score]   # 0 thấp · 1 TB · 2 cao
+        z = [[0 if v < 8 else 1 if v < 15 else 2 for v in r_] for r_ in score]
         text = [[str(grid[im][li]) if grid[im][li] else "" for li in range(5)] for im in range(5)]
         fig = go.Figure(go.Heatmap(
             z=z, x=[1, 2, 3, 4, 5], y=[1, 2, 3, 4, 5], text=text, texttemplate="%{text}",
@@ -1109,10 +1054,7 @@ def page_risk() -> None:
                            file_name=f"rui_ro_{day:%Y%m%d}.csv", mime="text/csv", icon=":material/download:")
 
 
-# ===========================================================================
-# TRANG – THỜI HẠN BẢO QUẢN
-# ===========================================================================
-LOT_STATE = {  # lớp màu, nhãn trạng thái, việc cần làm
+LOT_STATE = {
     "safe": ("ok", "An toàn", "Xuất theo nhập trước – xuất trước."),
     "first": ("low", "Ưu tiên xuất trước", "Bán lô cũ trước; không nhập thêm đến khi lô cũ gần hết."),
     "near": ("out", "Cận hạn", "Đẩy bán / giảm giá ngay; kiểm tra chất lượng."),
@@ -1244,14 +1186,10 @@ def page_storage() -> None:
                "(nhập trước – xuất trước).")
 
 
-# ===========================================================================
-# TRANG – KPI NGƯỜI QUẢN LÝ KHO
-# ===========================================================================
 MANAGER_COLORS = ["#14532D", "#1D4ED8", "#B45309", "#6B21A8", "#0E7490", "#9F1239"]
 
 
 def manager_remark(row, prev) -> str:
-    """Một dòng nhận xét: điểm mạnh nhất (cải thiện nhiều nhất) và điểm cần chú ý."""
     parts = []
     bad = [k for k in kpi.KPI_DEFS if kpi.evaluate(k, row[k]) != kpi.GOOD]
     if prev is not None:
@@ -1320,7 +1258,6 @@ def page_kpi_managers() -> None:
     order = sorted(data, key=lambda u: -data[u]["row"]["score"])
     colors = {u: MANAGER_COLORS[k % len(MANAGER_COLORS)] for k, u in enumerate(sorted(data))}
 
-    # --- Thẻ từng người (xếp hạng)
     def initials(name: str) -> str:
         w = (name or "?").split()
         return (w[0][:1] + (w[-1][:1] if len(w) > 1 else "")).upper()
@@ -1354,7 +1291,6 @@ def page_kpi_managers() -> None:
 <div class="rm"><b>Nhận xét:</b> {manager_remark(row, prev)}</div></section>""")
     st.html(f'<div class="sk-people">{"".join(cards)}</div>')
 
-    # --- Bảng so sánh chỉ số
     with st.container(border=True, key="card_mgr_table"):
         st.markdown(f"#### So sánh chỉ số giữa các người quản lý · {sel}")
         head = ["Tiêu chí", "Chỉ số (Index)", "Tiêu chuẩn (Đạt)"] + [escape(data[u]["name"] or "") for u in order]
@@ -1417,9 +1353,6 @@ def page_kpi_managers() -> None:
         st.caption("Người quản lý chỉ thấy KPI của mình; quản trị viên xem được bảng xếp hạng cả kho.")
 
 
-# ---------------------------------------------------------------------------
-# Điều hướng (thanh bên)
-# ---------------------------------------------------------------------------
 pg_stock = st.Page(page_stock, title="Tồn kho", icon=":material/inventory_2:",
                    url_path="ton-kho", default=True)
 pg_tx = st.Page(page_tx, title="Nhập / Xuất kho", icon=":material/swap_vert:", url_path="nhap-xuat")
@@ -1447,8 +1380,6 @@ pg_storage = st.Page(page_storage, title="Thời hạn bảo quản", icon=":mat
                      url_path="thoi-han-bao-quan")
 pg_risk = st.Page(page_risk, title="Quản lý rủi ro", icon=":material/warning:", url_path="rui-ro")
 
-# Quản trị viên: mọi trang. Nhân viên: chỉ các trang xem (không ghi phiếu, không sửa sản phẩm).
-# Trang không có trong danh sách thì không mở được, kể cả khi gõ thẳng địa chỉ.
 reports = [pg_daily, pg_kpi_mgr, pg_kpi, pg_report, pg_risk]
 if USER["is_admin"]:
     pages = {"Kho hàng": [pg_stock, pg_storage, pg_tx, pg_products, pg_history], "Báo cáo & đánh giá": reports,

@@ -1,11 +1,12 @@
-# 🛒 Quản lý & phân loại nhu yếu phẩm (Streamlit)
+# 🏭 KPI quản trị công nghiệp
 
-Ứng dụng web viết bằng **Python + Streamlit** để **quản lý tồn kho, nhập / xuất
-hàng và phân loại** các mặt hàng thiết yếu hằng ngày: sữa (lít), gạo (kg),
-muối, tiêu, dầu ăn, bột ngọt...
+Ứng dụng web viết bằng **Python + Streamlit** để **quản lý kho nhu yếu phẩm** hằng ngày
+(sữa, gạo, muối, tiêu, dầu ăn, bột ngọt...) và **đánh giá KPI người quản lý kho** theo quý:
+tồn kho, thời hạn bảo quản, nhập / xuất / hủy hàng, báo cáo cuối ngày, quản lý rủi ro,
+phương án cải tiến, báo cáo biểu đồ.
 
-Có sẵn bộ dữ liệu mẫu (16 mặt hàng, ~1.400 giao dịch trong 3,5 tháng) để chạy
-thử ngay.
+Có sẵn bộ dữ liệu mẫu (18 mặt hàng, ~5.300 giao dịch từ 01/01 đến 12/11/2026, đủ 4 quý)
+để chạy thử ngay.
 
 ---
 
