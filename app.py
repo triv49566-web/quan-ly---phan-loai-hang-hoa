@@ -308,7 +308,7 @@ def plot_layout(fig: go.Figure, title: str, height: int = 340, **kw) -> go.Figur
 def page_stock() -> None:
     n_cats = stock["category"].nunique()
     page_head("Tồn kho", f"Tính đến {AS_OF} · {len(stock)} mặt hàng trong {n_cats} danh mục",
-              (pg_tx, "Ghi nhập / xuất") if USER["can_write"] else None)
+              (pg_tx, "Lập phiếu kho") if USER["can_write"] else None)
 
     counts = {s: int((stock["status"] == s).sum()) for s in STATUSES}
     st.html(f"""
@@ -327,15 +327,22 @@ def page_stock() -> None:
         items = []
         for _, r in needs.iterrows():
             if r["quantity"] <= 0 or days_text(r) == "–":
-                sub = f"tối thiểu {fmt_qty(r['min_stock'])} {r['unit']}"
+                sub = f"ROP {fmt_qty(r['rop'])} {r['unit']}"
             else:
-                sub = f"đủ dùng {days_text(r)}"
+                sub = f"đủ dùng {days_text(r)} · ROP {fmt_qty(r['rop'])} · nên đặt {fmt_qty(r['order_qty'])} {r['unit']}"
             items.append(
                 f'<div class="sk-need"><span><b>{escape(r["name"])}</b>'
                 f'<span class="sk-sub">Còn {fmt_qty(r["quantity"])} {escape(r["unit"])} · {sub}</span></span>'
                 f'{pill(r["status"])}</div>')
-        st.html('<section class="sk-card sk-pad" aria-label="Cần nhập hàng"><h3>Cần nhập hàng</h3>'
+        st.html('<section class="sk-card sk-pad" aria-label="Cần nhập hàng"><h3>Cần nhập hàng (tồn ≤ điểm đặt hàng ROP)</h3>'
                 f'<div class="sk-needs">{"".join(items)}</div></section>')
+        mine_below = needs[needs["id"].isin(MY_PIDS) & (needs["order_qty"] > 0)]
+        if USER["can_write"] and not mine_below.empty:
+            if st.button(f"Tạo phiếu nhập cho {len(mine_below)} mặt hàng dưới ROP", type="primary",
+                         icon=":material/playlist_add:"):
+                st.session_state["prefill_rop"] = True
+                _reset_form("in")
+                st.switch_page(pg_tx)
 
     with st.container(border=True, key="card1"):
         head, search = st.columns([3, 2], vertical_alignment="center")
@@ -360,7 +367,7 @@ def page_stock() -> None:
 
         rows = []
         for _, r in view.iterrows():
-            mn = float(r["min_stock"])
+            mn = float(r["rop"])
             scale = mn * 4 if mn > 0 else max(float(r["quantity"]), 1)
             bar = min(float(r["quantity"]) / scale, 1) * 100
             u = escape(r["unit"])
@@ -369,7 +376,7 @@ def page_stock() -> None:
                 f'<td><span class="sk-pill neutral">{escape(r["storage"])}</span><br>'
                 f'<span class="sk-sub">hạn {int(r["shelf_life_days"])} ngày{expiry_note(r["id"])}</span></td>'
                 f'<td><div class="sk-meter"><div class="top"><b>{fmt_qty(r["quantity"])} {u}</b>'
-                f'<span class="sk-sub">tối thiểu {fmt_qty(mn)} {u}</span></div>'
+                f'<span class="sk-sub">ROP {fmt_qty(mn)} {u}</span></div>'
                 f'<div class="sk-bar"><i style="width:{bar:.1f}%;background:{STATUS_BAR[r["status"]]}"></i></div></div></td>'
                 f'<td class="r">{fmt_qty(r["price"])} đ/{u}</td><td class="r"><b>{fmt_money(r["value"])}</b></td>'
                 f'<td class="r">{days_text(r)}</td><td>{pill(r["status"])}</td></tr>')
@@ -377,10 +384,10 @@ def page_stock() -> None:
         empty = "" if rows else '<p class="sk-empty">Không có mặt hàng nào khớp. Thử xóa từ khóa hoặc chọn “Tất cả”.</p>'
         st.html(f"""
 <div class="sk-wrap"><table class="sk-table">
-<thead><tr><th>Sản phẩm</th><th>Danh mục</th><th>Bảo quản</th><th>Tồn kho so với mức tối thiểu</th>
+<thead><tr><th>Sản phẩm</th><th>Danh mục</th><th>Bảo quản</th><th>Tồn kho so với điểm đặt hàng (ROP)</th>
 <th class="r">Đơn giá</th><th class="r">Giá trị tồn</th><th class="r">Đủ dùng</th><th>Trạng thái</th></tr></thead>
 <tbody>{body}</tbody></table>{empty}</div>
-<p class="sk-note">Vạch đen trên thanh là mức tồn tối thiểu. “Đủ dùng” = tồn kho chia cho lượng xuất
+<p class="sk-note">Vạch đen trên thanh là điểm đặt hàng ROP = d × L + z × σ × √L (z = 1,65, mức phục vụ 95%). “Đủ dùng” = tồn kho chia cho lượng xuất
 bình quân mỗi ngày trong {inventory.WINDOW_DAYS} ngày gần nhất.</p>""")
 
         export = view[["name", "category", "storage", "shelf_life_days", "unit", "quantity", "min_stock",
@@ -389,77 +396,240 @@ bình quân mỗi ngày trong {inventory.WINDOW_DAYS} ngày gần nhất.</p>"""
                            file_name="ton_kho.csv", mime="text/csv", icon=":material/download:")
 
 
+def _slip_lines(edited: pd.DataFrame, by_name: pd.DataFrame, with_price: bool) -> list[dict]:
+    """Đổi bảng người dùng nhập thành các dòng phiếu (bỏ dòng trống)."""
+    lines = []
+    for _, r in edited.iterrows():
+        name = r.get("Sản phẩm")
+        qty = r.get("Số lượng")
+        if not name or name not in by_name.index or pd.isna(qty) or float(qty) <= 0:
+            continue
+        p = by_name.loc[name]
+        price = r.get("Đơn giá") if with_price else None
+        price = float(p["price"]) if price is None or pd.isna(price) else float(price)
+        lines.append({"product_id": int(p["id"]), "name": name, "unit": p["unit"], "quantity": float(qty),
+                      "unit_price": price, "stock": float(p["quantity"]), "note": r.get("Ghi chú") or ""})
+    return lines
+
+
+def _open_time(key: str) -> str:
+    """Giờ mở phiếu: ghi lại lần đầu form hiện ra, dùng để đo thời gian xử lý."""
+    if key not in st.session_state:
+        st.session_state[key] = db.now_str()
+    return st.session_state[key]
+
+
+def _reset_form(key: str) -> None:
+    st.session_state.pop(f"open_{key}", None)
+    st.session_state[f"ver_{key}"] = st.session_state.get(f"ver_{key}", 0) + 1
+
+
+def next_batch(now: dt.datetime | None = None) -> str:
+    now = now or dt.datetime.now()
+    return "Đợt 10h" if now.hour < 10 else "Đợt 15h" if now.hour < 15 else "Đợt 10h (sáng mai)"
+
+
 def page_tx() -> None:
-    page_head("Nhập / Xuất kho",
-              "Mỗi phiếu ghi một lần hàng vào hoặc ra khỏi kho. Tồn kho tự tính lại theo phiếu.")
-    left, right = st.columns([1, 1], gap="large")
+    page_head("Phiếu kho", "Phiếu nhập / hủy nhiều dòng ghi một lần; hàng xuất đi qua hàng chờ và được gom "
+                           "theo đợt 10h, 15h. Mỗi phiếu tự ghi giờ mở và giờ ghi nhận để đo thời gian xử lý.")
+    mine = stock[stock["id"].isin(MY_PIDS)].sort_values("name")
+    if mine.empty:
+        st.info("Chưa có sản phẩm nào bạn được giao phụ trách. Nhờ quản trị viên phân công danh mục."
+                if not USER["is_admin"] else "Chưa có sản phẩm. Hãy thêm ở trang **Sản phẩm & danh mục**.")
+        return
+    by_name = mine.set_index("name")
+    names = by_name.index.tolist()
+    reqs = db.requests_df(conn)
+    if not USER["is_admin"]:
+        reqs = reqs[reqs["product_id"].isin(MY_PIDS)]
+    waiting = reqs[reqs["status"] == "waiting"]
+    n_pick = int((reqs["status"] == "picking").sum())
+    labels = {"in": "Phiếu nhập / hủy", "req": f"Yêu cầu xuất ({len(waiting)} đang chờ)",
+              "pick": f"Đợt xuất 10h / 15h ({n_pick} đang lấy)"}
+    view = st.segmented_control("Mục", list(labels), format_func=labels.get, default="in", key="slip_view",
+                                label_visibility="collapsed") or "in"
+    tab_in = tab_req = tab_pick = None
+    if view == "in":
+        tab_in = st.container()
+    elif view == "req":
+        tab_req = st.container()
+    else:
+        tab_pick = st.container()
 
-    with left, st.container(border=True, key="card2"):
-        st.markdown("#### Phiếu mới")
-        mine = stock[stock["id"].isin(MY_PIDS)]
-        if mine.empty:
-            st.info("Chưa có sản phẩm nào bạn được giao phụ trách. Nhờ quản trị viên phân công danh mục."
-                    if not USER["is_admin"] else "Chưa có sản phẩm. Hãy thêm ở trang **Sản phẩm & danh mục**.")
-            return
-        if not USER["is_admin"]:
-            st.caption("Bạn chỉ ghi phiếu được cho các danh mục mình phụ trách.")
-        by_id = mine.sort_values("name").set_index("id")
-        tx_type = st.segmented_control("Loại phiếu", [TX_IN, TX_OUT, TX_DISPOSE], default=TX_OUT,
-                                       format_func=TX_LABEL.get, label_visibility="collapsed",
-                                       width="stretch") or TX_OUT
-        pid = st.selectbox("Sản phẩm", by_id.index.tolist(),
-                           format_func=lambda i: f"{by_id.at[i, 'name']} — còn "
-                                                 f"{fmt_qty(by_id.at[i, 'quantity'])} {by_id.at[i, 'unit']}")
-        p = by_id.loc[pid]
-        unit, stock_qty = p["unit"], float(p["quantity"])
-        a, b = st.columns(2)
-        step = 1.0 if unit in COUNT_UNITS else 0.1
-        qty = a.number_input(f"Số lượng ({unit})", min_value=0.0, step=step, format="%g",
-                             key=f"qty_{pid}")
-        price = b.number_input(f"Đơn giá (đ / {unit})", min_value=0.0, step=1000.0,
-                               value=float(p["price"]), format="%g", key=f"price_{pid}")
-        a, b = st.columns(2)
-        tx_date = a.date_input("Ngày", value=dt.date.today(), format="DD/MM/YYYY")
-        note = b.text_input("Ghi chú", placeholder="Ví dụ: bán lẻ, nhập từ NCC A")
-
-        if tx_type == TX_DISPOSE:
-            st.caption("Hủy hàng: ghi hàng hết hạn / hư hỏng phải bỏ. Được tính vào KPI hao hụt.")
-        is_out = tx_type in (TX_OUT, TX_DISPOSE)
-        over = is_out and qty > stock_qty
-        after = stock_qty - qty if is_out else stock_qty + qty
-        after_txt = "Không đủ" if over else f"{fmt_qty(after)} {escape(unit)}"
-        st.html(f"""
-<dl class="sk-preview">
-<div><dt>Tồn hiện tại</dt><dd>{fmt_qty(stock_qty)} {escape(unit)}</dd></div>
-<div><dt>Tồn sau phiếu</dt><dd class="{'bad' if over else ''}">{after_txt}</dd></div>
-<div><dt>Thành tiền</dt><dd>{fmt_money(qty * price)}</dd></div>
-</dl>""")
+    # ---------------- Phiếu nhập / hủy nhiều dòng
+    if tab_in is not None:
+      with tab_in, st.container(border=True, key="card_slip_in"):
+        a, b, c = st.columns([2, 1, 1], vertical_alignment="bottom")
+        kind = a.segmented_control("Loại phiếu", [TX_IN, TX_DISPOSE], default=TX_IN, format_func=TX_LABEL.get,
+                                   key="slip_kind") or TX_IN
+        slip_day = b.date_input("Ngày", value=dt.date.today(), format="DD/MM/YYYY", key="slip_day")
+        below = mine[(mine["status"] != IN_STOCK) & (mine["order_qty"] > 0)]
+        if c.button(f"Hàng dưới ROP ({len(below)})", icon=":material/playlist_add:",
+                    disabled=kind != TX_IN or below.empty, width="stretch"):
+            st.session_state["prefill_rop"] = True
+            _reset_form("in")
+        if st.session_state.pop("prefill_rop", False) and not below.empty:
+            st.session_state["slip_rows"] = pd.DataFrame({
+                "Sản phẩm": below["name"], "Số lượng": below["order_qty"].astype(float),
+                "Đơn giá": below["price"].astype(float), "Ghi chú": "Đặt theo ROP"}).reset_index(drop=True)
+        rows = st.session_state.get("slip_rows")
+        if rows is None:
+            rows = pd.DataFrame({"Sản phẩm": [None], "Số lượng": [None], "Đơn giá": [None], "Ghi chú": [""]})
+        started = _open_time("open_in")
+        edited = st.data_editor(
+            rows, num_rows="dynamic", width="stretch", hide_index=True, key=f"ed_in_{st.session_state.get('ver_in', 0)}",
+            column_config={
+                "Sản phẩm": st.column_config.SelectboxColumn(options=names, required=True, width="large"),
+                "Số lượng": st.column_config.NumberColumn(min_value=0.0, step=0.1, format="%g"),
+                "Đơn giá": st.column_config.NumberColumn(min_value=0.0, step=1000.0, format="%g",
+                                                         help="Để trống = đơn giá tham khảo của sản phẩm"),
+                "Ghi chú": st.column_config.TextColumn()})
+        lines = _slip_lines(edited, by_name, with_price=True)
+        over = [l for l in lines if kind == TX_DISPOSE and l["quantity"] > l["stock"] + 1e-9]
+        if lines:
+            prev = "".join(
+                f'<tr><td><b>{escape(l["name"])}</b></td><td class="r">{fmt_qty(l["quantity"])} {escape(l["unit"])}</td>'
+                f'<td class="r">{fmt_money(l["unit_price"])}</td><td class="r">{fmt_money(l["quantity"] * l["unit_price"])}</td>'
+                f'<td class="r">{fmt_qty(l["stock"])} → <b>{fmt_qty(l["stock"] + (l["quantity"] if kind == TX_IN else -l["quantity"]))}</b></td></tr>'
+                for l in lines)
+            html_table(["Sản phẩm", "Số lượng", "Đơn giá", "Thành tiền", "Tồn hiện tại → sau phiếu"], [prev],
+                       right={1, 2, 3, 4}, cls="sk-compact")
         if over:
-            st.error(f"Không đủ hàng để {'hủy' if tx_type == TX_DISPOSE else 'xuất'}: "
-                     f"kho chỉ còn {fmt_qty(stock_qty)} {unit}.")
-        if st.button("Ghi nhận phiếu", type="primary", width="stretch", disabled=over or qty <= 0):
+            st.error("Không đủ hàng để hủy: " + ", ".join(f'{l["name"]} (còn {fmt_qty(l["stock"])})' for l in over))
+        total = sum(l["quantity"] * l["unit_price"] for l in lines)
+        if st.button(f"Ghi nhận phiếu · {len(lines)} dòng · {fmt_money(total)}", type="primary", width="stretch",
+                     disabled=not lines or bool(over), key="save_in"):
             try:
-                db.add_transaction(conn, int(pid), tx_type, qty, price, tx_date, note,
-                                   created_by=USER["username"])
-                notify(f"Đã ghi: {TX_LABEL[tx_type].lower()} {fmt_qty(qty)} {unit} {p['name']}, "
-                       f"thành tiền {fmt_money(qty * price)}.")
+                oid = db.add_order(conn, kind, lines, slip_day, started_at=started, created_by=USER["username"])
+                st.session_state.pop("slip_rows", None)
+                _reset_form("in")
+                notify(f"Đã ghi phiếu {oid}: {len(lines)} dòng, {fmt_money(total)}.")
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
+        st.caption(f"Phiếu mở lúc {started[11:16]}. Giờ ghi nhận lấy lúc bấm nút; KPI tính phút / dòng hàng.")
 
-    with right, st.container(border=True, key="card3"):
+    # ---------------- Yêu cầu xuất
+    if tab_req is not None:
+      with tab_req, st.container(border=True, key="card_req"):
+        st.markdown("#### Gửi yêu cầu xuất")
+        st.caption("Yêu cầu vào hàng chờ, gom theo đợt 10h / 15h. Đánh dấu **Gấp** để kho xử lý ngay ngoài đợt.")
+        all_names = stock.sort_values("name")["name"].tolist()
+        all_by_name = stock.set_index("name")
+        ed = st.data_editor(
+            pd.DataFrame({"Sản phẩm": [None], "Số lượng": [None], "Ghi chú": [""]}), num_rows="dynamic",
+            width="stretch", hide_index=True, key=f"ed_req_{st.session_state.get('ver_req', 0)}",
+            column_config={"Sản phẩm": st.column_config.SelectboxColumn(options=all_names, required=True, width="large"),
+                           "Số lượng": st.column_config.NumberColumn(min_value=0.0, step=0.1, format="%g"),
+                           "Ghi chú": st.column_config.TextColumn()})
+        rl = _slip_lines(ed, all_by_name, with_price=False)
+        a, b = st.columns([1, 2], vertical_alignment="center")
+        urgent = a.checkbox("Gấp", key="req_urgent", help="Xử lý ngay, không chờ đợt 10h / 15h")
+        if b.button(f"Gửi yêu cầu · {len(rl)} dòng", type="primary", disabled=not rl, width="stretch"):
+            try:
+                n = db.add_requests(conn, rl, urgent, USER["username"])
+                _reset_form("req")
+                notify(f"Đã gửi {n} dòng yêu cầu xuất{' gấp' if urgent else ''} vào hàng chờ.")
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+    if tab_req is not None:
+      with tab_req, st.container(border=True, key="card_req_list"):
+        st.markdown(f"#### Hàng chờ · {next_batch()} tiếp theo")
+        if waiting.empty:
+            st.caption("Không có yêu cầu nào đang chờ.")
+        else:
+            rows = [f'<tr><td>{tag("Gấp", "out") if r["urgent"] else tag("Thường", "neutral")}</td>'
+                    f'<td><b>{escape(r["product"])}</b><br><span class="sk-sub">kệ {escape(r["shelf_location"] or "–")}'
+                    f' · {escape(r["requested_by"] or "")} · {r["created_at"]:%d/%m %H:%M}</span></td>'
+                    f'<td class="r">{fmt_qty(r["quantity"])} {escape(r["unit"])}</td></tr>' for _, r in waiting.iterrows()]
+            html_table(["Loại", "Sản phẩm", "Số lượng"], rows, right={2}, cls="sk-compact")
+            cid = st.selectbox("Hủy một yêu cầu", waiting["id"].tolist(), index=None, placeholder="Chọn yêu cầu…",
+                               format_func=lambda i: f"#{i} · {waiting.set_index('id').at[i, 'product']}")
+            if cid is not None and st.button("Hủy yêu cầu", icon=":material/close:"):
+                db.cancel_request(conn, int(cid))
+                notify(f"Đã hủy yêu cầu #{cid}.", ":material/close:")
+                st.rerun()
+
+    # ---------------- Đợt xuất & danh sách lấy hàng
+    if tab_pick is not None:
+      with tab_pick:
+        urgent_w = waiting[waiting["urgent"] == 1]
+        a, b = st.columns(2)
+        with a, st.container(border=True, key="card_batch"):
+            st.markdown(f"#### {next_batch()}")
+            st.caption(f"{len(waiting)} dòng đang chờ ({len(urgent_w)} gấp). Đến giờ chốt thì tạo danh sách lấy hàng; "
+                       "danh sách xếp theo vị trí kệ để đi một vòng là lấy đủ.")
+            if st.button("Tạo danh sách lấy hàng", type="primary", disabled=waiting.empty, width="stretch",
+                         icon=":material/checklist:"):
+                pl = db.create_pick_list(conn, waiting["id"].tolist(), next_batch().split(" (")[0], USER["username"])
+                notify(f"Đã tạo danh sách lấy hàng #{pl}.")
+                st.rerun()
+        with b, st.container(border=True, key="card_urgent"):
+            st.markdown("#### Yêu cầu gấp")
+            st.caption("Xử lý ngay, không chờ đợt.")
+            if st.button(f"Xử lý gấp {len(urgent_w)} dòng", disabled=urgent_w.empty, width="stretch",
+                         icon=":material/bolt:"):
+                pl = db.create_pick_list(conn, urgent_w["id"].tolist(), "Gấp", USER["username"])
+                notify(f"Đã tạo danh sách lấy hàng gấp #{pl}.")
+                st.rerun()
+
+        picking = reqs[reqs["status"] == "picking"]
+        if picking.empty:
+            st.info("Không có danh sách lấy hàng nào đang mở.")
+        lists = db.pick_lists_df(conn).set_index("id")
+        for pl_id, g in picking.groupby("pick_list_id"):
+            pl = lists.loc[int(pl_id)]
+            g = g.assign(_k=g["shelf_location"].fillna("ZZZ").replace("", "ZZZ")).sort_values(["_k", "product"])
+            stock_now = stock.set_index("id")["quantity"]
+            with st.container(border=True, key=f"card_pl_{int(pl_id)}"):
+                st.markdown(f"#### Danh sách lấy hàng #{int(pl_id)} · {pl['kind']} · tạo lúc {pl['created_at'][11:16]}")
+                rows = [f'<tr><td><b>{escape(r["shelf_location"] or "–")}</b></td><td><b>{escape(r["product"])}</b>'
+                        f'<br><span class="sk-sub">{escape(r["note"] or "")}</span></td>'
+                        f'<td class="r">{fmt_qty(r["quantity"])} {escape(r["unit"])}</td>'
+                        f'<td class="r">{fmt_qty(stock_now.get(r["product_id"], 0))}</td>'
+                        f'<td>{tag("Gấp", "out") if r["urgent"] else ""}</td></tr>' for _, r in g.iterrows()]
+                html_table(["Kệ", "Sản phẩm", "Cần lấy", "Tồn hiện có", ""], rows, right={2, 3}, cls="sk-compact")
+                c1, c2 = st.columns(2)
+                c1.download_button("Tải để in (CSV)", g[["shelf_location", "product", "quantity", "unit", "note"]]
+                                   .rename(columns={"shelf_location": "Kệ", "product": "Sản phẩm", "quantity": "Số lượng",
+                                                    "unit": "Đơn vị", "note": "Ghi chú"})
+                                   .to_csv(index=False).encode("utf-8-sig"),
+                                   file_name=f"lay_hang_{int(pl_id)}.csv", mime="text/csv", icon=":material/print:",
+                                   width="stretch", key=f"dl_pl_{int(pl_id)}")
+                if c2.button("Xác nhận đã lấy xong", type="primary", width="stretch", key=f"done_pl_{int(pl_id)}"):
+                    try:
+                        res = db.complete_pick_list(conn, int(pl_id), USER["username"])
+                        notify(f"Đã xuất phiếu {res['order_id']}: {res['lines']} dòng"
+                               + (f", {res['short']} dòng thiếu hàng" if res["short"] else "") + ".")
+                        st.rerun()
+                    except ValueError as e:
+                        st.error(str(e))
+
+    # ---------------- Phiếu gần đây (gộp theo mã phiếu)
+    with st.container(border=True, key="card_orders"):
         h, lnk = st.columns([3, 2], vertical_alignment="center")
-        h.markdown("#### Giao dịch gần đây")
+        h.markdown("#### Phiếu gần đây")
         lnk.page_link(pg_history, label="Xem toàn bộ lịch sử")
-        items = []
-        for _, t in tx.head(12).iterrows():
-            items.append(
-                f'<li><span class="sk-tag {t["type"]}">{ {TX_IN: "Nhập", TX_OUT: "Xuất", TX_DISPOSE: "Hủy"}.get(t["type"], "K.kê") }</span>'
-                f'<div class="g"><b>{escape(t["product"])}</b><span>{t["date"]:%d/%m/%Y} · '
-                f'{fmt_qty(t["quantity"])} {escape(t["unit"])}</span></div>'
-                f'<b style="white-space:nowrap">{fmt_money(t["quantity"] * t["unit_price"])}</b></li>')
-        st.html(f'<ul class="sk-list">{"".join(items)}</ul>'
-                if items else '<p class="sk-empty">Chưa có giao dịch.</p>')
+        t = tx[tx["product_id"].isin(MY_PIDS) & (tx["order_id"].fillna("") != "")]
+        if t.empty:
+            st.caption("Chưa có phiếu.")
+        else:
+            g = (t.assign(v=t["quantity"] * t["unit_price"], s=pd.to_datetime(t["started_at"]),
+                          f=pd.to_datetime(t["finished_at"]))
+                 .groupby("order_id").agg(date=("date", "max"), type=("type", "first"), n=("id", "count"),
+                                          v=("v", "sum"), s=("s", "min"), f=("f", "max"), who=("created_by", "first"))
+                 .sort_values(["date", "f"], ascending=False).head(10))
+            rows = []
+            for oid, r in g.iterrows():
+                mins = (r["f"] - r["s"]).total_seconds() / 60 if pd.notna(r["f"]) and pd.notna(r["s"]) else None
+                per = f"{mins:.0f} phút · {mins / r['n']:.1f} phút/dòng".replace(".", ",") if mins is not None else "–"
+                rows.append(f'<tr><td class="nowrap">{r["date"]:%d/%m/%Y}</td>'
+                            f'<td><b>{escape(oid)}</b><br><span class="sk-sub">{escape(TX_LABEL.get(r["type"], r["type"]))}'
+                            f' · {escape(r["who"] or "")}</span></td><td class="r">{int(r["n"])}</td>'
+                            f'<td class="r">{fmt_money(r["v"])}</td><td class="r">{per}</td></tr>')
+            html_table(["Ngày", "Mã phiếu", "Số dòng", "Giá trị", "Thời gian xử lý"], rows, right={2, 3, 4},
+                       cls="sk-compact")
 
 
 cat_options = [None] + cats["id"].tolist()
@@ -493,11 +663,16 @@ def page_products() -> None:
                 a, b = st.columns(2)
                 zone = a.selectbox("Khu bảo quản", ["", *ZONES], format_func=lambda z: z or "Tự chọn theo hạn dùng")
                 cond = b.text_input("Điều kiện bảo quản", placeholder="Ví dụ: Thùng kín, kê cao khỏi sàn, chống mọt")
+                a, b = st.columns(2)
+                lead = a.number_input("Thời gian chờ giao (ngày)", min_value=0, max_value=90, value=2, step=1,
+                                      help="Số ngày từ lúc đặt đến lúc nhà cung cấp giao, dùng tính ROP.")
+                shelf_loc = b.text_input("Vị trí kệ", placeholder="Ví dụ: A-01 (dãy A gần cửa xuất)")
                 note = st.text_input("Ghi chú")
                 if st.form_submit_button("Thêm sản phẩm", type="primary", icon=":material/add:"):
                     try:
                         db.add_product(conn, name, cid, unit, price, min_stock, note, opening,
-                                       shelf_life_days=int(shelf), storage_zone=zone, storage_note=cond)
+                                       shelf_life_days=int(shelf), storage_zone=zone, storage_note=cond,
+                                       lead_time_days=int(lead), shelf_location=shelf_loc)
                         notify(f"Đã thêm sản phẩm “{name.strip()}”.")
                         st.rerun()
                     except ValueError as e:
@@ -534,13 +709,18 @@ def page_products() -> None:
                     zone = a.selectbox("Khu bảo quản", zopts, index=zopts.index(cur_zone),
                                        format_func=lambda z: z or "Tự chọn theo hạn dùng")
                     cond = b.text_input("Điều kiện bảo quản", value=e["storage_note"] or "")
+                    a, b = st.columns(2)
+                    lead = a.number_input("Thời gian chờ giao (ngày)", min_value=0, max_value=90, step=1,
+                                          value=int(e["lead_time_days"]))
+                    shelf_loc = b.text_input("Vị trí kệ", value=e["shelf_location"] or "")
                     note = st.text_input("Ghi chú", value=e["note"] or "")
                     st.caption("Số lượng tồn kho không sửa ở đây: hãy ghi phiếu nhập / xuất để sổ luôn khớp.")
                     if st.form_submit_button("Lưu thay đổi", type="primary"):
                         try:
                             db.update_product(conn, int(eid), name, cid, unit, price, min_stock, note,
                                               shelf_life_days=int(shelf), storage_zone=zone,
-                                              storage_note=cond)
+                                              storage_note=cond, lead_time_days=int(lead),
+                                              shelf_location=shelf_loc)
                             notify(f"Đã cập nhật “{name.strip()}”.")
                             st.rerun()
                         except ValueError as err:
@@ -699,6 +879,7 @@ def page_history() -> None:
             "Thành tiền": h["quantity"] * h["unit_price"],
             "Ghi chú": h["note"],
             "Người lập": h["created_by"].fillna(""),
+            "Mã phiếu": h["order_id"].fillna(""),
         })
         st.dataframe(out, hide_index=True, width="stretch", height=520, column_config={
             "Số lượng": st.column_config.NumberColumn(format="localized"),
@@ -803,7 +984,7 @@ def page_account() -> None:
                 st.error(str(e))
 
 
-KPI_CLS = {kpi.GOOD: "ok", kpi.WARN: "low", kpi.BAD: "out"}
+KPI_CLS = {kpi.GOOD: "ok", kpi.WARN: "low", kpi.BAD: "out", kpi.NA: "neutral"}
 RISK_CLS = {risk.HIGH: "out", risk.MEDIUM: "low", risk.LOW: "neutral"}
 PRIORITY_CLS = {"Cao": "out", "Trung bình": "low", "Theo dõi": "neutral"}
 GRADE_COLOR = {"A": "#2F7D53", "B": "#1D4ED8", "C": "#B45309", "D": "#7F1D13"}
@@ -1454,9 +1635,58 @@ def page_count() -> None:
                    right={2}, empty="Chưa có lần kiểm kê nào.", cls="sk-compact")
 
 
+def page_abc() -> None:
+    page_head("Phân tích ABC & vị trí kệ",
+              "Xếp mặt hàng theo giá trị xuất: nhóm A (80% giá trị đầu tiên) lấy nhiều nhất nên đặt ở dãy kệ gần "
+              "cửa xuất; B tới 95%; C còn lại. Danh sách lấy hàng đi theo thứ tự kệ.")
+    abc = inventory.abc_table(stock, tx)
+    if abc["out_value"].sum() <= 0:
+        st.info("Chưa có dữ liệu xuất kho.")
+        return
+    n = abc["abc"].value_counts()
+    share = abc.groupby("abc")["share"].sum()
+    stat_cards([(f"Nhóm {g}", f"{int(n.get(g, 0))} <small>mặt hàng</small>", "",
+                 f"{share.get(g, 0):.0f}% giá trị xuất".replace(".", ",")) for g in "ABC"]
+               + [("Cần đổi kệ", f"{int(((abc['abc'] == 'A') & ~abc['shelf_location'].fillna('').str.match(r'^[AM]')).sum())}"
+                   " <small>mặt hàng A</small>", "low", "nhóm A chưa ở dãy A / kho mát")])
+    a, b = st.columns([1.3, 1])
+    with a, st.container(border=True, key="card_pareto"):
+        fig = go.Figure()
+        colors = {"A": ACCENT, "B": "#1D4ED8", "C": "#9DB8AA"}
+        fig.add_bar(x=abc["name"], y=abc["share"], marker_color=[colors[g] for g in abc["abc"]], name="% giá trị")
+        fig.add_scatter(x=abc["name"], y=abc["cum_share"], mode="lines+markers", name="% lũy kế",
+                        line=dict(color=OUT_COLOR), yaxis="y2")
+        fig.update_layout(yaxis2=dict(overlaying="y", side="right", range=[0, 105], title="% lũy kế"))
+        st.plotly_chart(plot_layout(fig, "Biểu đồ Pareto giá trị xuất", height=380, yaxis_title="% giá trị",
+                                    xaxis_tickangle=-45), width="stretch")
+    with b, st.container(border=True, key="card_abc_rule"):
+        st.markdown("#### Gợi ý bố trí kệ")
+        st.markdown("- **Dãy A** (sát cửa xuất): hàng nhóm **A**\n- **Dãy B–C**: nhóm **B**\n- **Dãy D–E** (xa cửa): nhóm **C**\n"
+                    "- **Kho mát (M)**: giữ nguyên cho hàng mau hỏng\n\nĐổi vị trí kệ ở trang *Sản phẩm & danh mục*.")
+    want = {"A": "A", "B": "B–C", "C": "D–E"}
+
+    def pct(v):
+        return f"{v:.1f}%".replace(".", ",")
+    rows = []
+    for _, r in abc.iterrows():
+        loc = (r["shelf_location"] or "").upper()
+        row_ = loc[:1]
+        ok = loc.startswith("M") or (r["abc"] == "A" and row_ == "A") or (r["abc"] == "B" and row_ in "BC" and row_) \
+            or (r["abc"] == "C" and row_ in "DE" and row_)
+        hint = tag("Đúng chỗ", "ok") if ok else tag(f"→ dãy {want[r['abc']]}", "low")
+        rows.append(f'<tr><td><b>{r["abc"]}</b></td><td><b>{escape(r["name"])}</b><br>'
+                    f'<span class="sk-sub">{escape(r["category"])}</span></td>'
+                    f'<td class="r">{fmt_money(r["out_value"])}</td><td class="r">{pct(r["share"])}</td>'
+                    f'<td class="r">{pct(r["cum_share"])}</td><td class="r">{int(r["out_lines"])}</td>'
+                    f'<td><b>{escape(loc or "–")}</b></td><td>{hint}</td></tr>')
+    with st.container(border=True, key="card_abc_table"):
+        html_table(["Nhóm", "Sản phẩm", "Giá trị xuất", "% giá trị", "% lũy kế", "Lượt xuất", "Kệ hiện tại", "Gợi ý"],
+                   rows, right={2, 3, 4, 5})
+
+
 pg_stock = st.Page(page_stock, title="Tồn kho", icon=":material/inventory_2:",
                    url_path="ton-kho", default=True)
-pg_tx = st.Page(page_tx, title="Nhập / Xuất kho", icon=":material/swap_vert:", url_path="nhap-xuat")
+pg_tx = st.Page(page_tx, title="Phiếu kho", icon=":material/swap_vert:", url_path="phieu-kho")
 pg_products = st.Page(page_products, title="Sản phẩm & danh mục", icon=":material/sell:",
                       url_path="san-pham")
 pg_report = st.Page(page_report, title="Báo cáo", icon=":material/bar_chart:", url_path="bao-cao")
@@ -1483,7 +1713,9 @@ pg_risk = st.Page(page_risk, title="Quản lý rủi ro", icon=":material/warnin
 
 pg_count = st.Page(page_count, title="Kiểm kê", icon=":material/fact_check:", url_path="kiem-ke")
 
-reports = [pg_daily, pg_kpi_mgr, pg_kpi, pg_report, pg_risk]
+pg_abc = st.Page(page_abc, title="Phân tích ABC & kệ", icon=":material/stacked_bar_chart:", url_path="abc")
+
+reports = [pg_daily, pg_kpi_mgr, pg_kpi, pg_report, pg_abc, pg_risk]
 if USER["is_admin"]:
     pages = {"Kho hàng": [pg_stock, pg_storage, pg_tx, pg_count, pg_products, pg_history],
              "Báo cáo & đánh giá": reports, "Hệ thống": [pg_account]}
@@ -1493,5 +1725,5 @@ elif USER["can_write"]:
 else:
     pages = {"Kho hàng": [pg_stock, pg_storage, pg_history], "Báo cáo & đánh giá": reports,
              "Hệ thống": [pg_account]}
-nav = st.navigation(pages)
+nav = st.navigation(pages, expanded=True)
 nav.run()

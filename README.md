@@ -107,13 +107,14 @@ khối nội dung màu trắng, chữ *Be Vietnam Pro*. Màu và font nằm tron
 |------|-------|-----------|
 | Kho hàng | **Tồn kho** | Ô tổng quan, khối *Cần nhập hàng*, bảng tồn kho; lọc theo danh mục và **nhóm bảo quản** (*Để lâu được* / *Mau hỏng*), hạn dùng và lô gần hết hạn |
 | | **Thời hạn bảo quản** | Theo **khu bảo quản** (kho mát 2–6 °C, kho khô, kho đông lạnh): **còn bao nhiêu ngày nữa hết hạn**, ngày hết hạn, từng lô đã lưu kho bao lâu, điều kiện bảo quản, việc cần làm; hàng sắp hết hạn xếp lên đầu |
-| | **Nhập / Xuất kho** | Ghi phiếu **nhập**, **xuất** hoặc **hủy hàng** (hết hạn / hư hỏng); không cho xuất / hủy quá tồn kho; mỗi phiếu lưu **người lập** |
+| | **Phiếu kho** | **Phiếu nhập / hủy nhiều dòng** ghi một lần (một mã phiếu); nút điền sẵn **hàng dưới ROP** với số lượng gợi ý. **Yêu cầu xuất** vào hàng chờ (đánh dấu *Gấp* để làm ngay); **đợt xuất 10h / 15h** tạo **danh sách lấy hàng xếp theo vị trí kệ**, tải để in, xác nhận lấy xong thì tự lập phiếu xuất. Mỗi phiếu tự ghi **giờ mở và giờ ghi nhận** |
 | | **Kiểm kê** | Nhập số **đếm thực tế**, so với sổ sách; lệch thì tự lập phiếu điều chỉnh. Tính **độ chính xác tồn kho**, giá trị hao hụt; lọc các lần lệch sổ |
 | | **Sản phẩm & danh mục** | Thêm / sửa / xóa sản phẩm (có **hạn sử dụng**, **mức dự trữ**); thêm / xóa danh mục |
 | | **Lịch sử giao dịch** | Lọc theo tên, loại, danh mục, khoảng ngày; tải CSV |
 | Báo cáo & đánh giá | **Báo cáo cuối ngày** | Chọn ngày: tồn đầu ngày, nhập, xuất, hủy, tồn cuối ngày, hàng cận hạn, hàng dưới mức dự trữ; tải CSV |
 | | **KPI người quản lý kho** | Chấm điểm **từng người quản lý** theo các danh mục được giao: hạng, điểm, xếp loại, nhận xét, so sánh 8 chỉ số giữa các người, điểm qua các quý, phương án cải tiến theo từng người. Quản trị viên xem cả bảng xếp hạng; người quản lý chỉ thấy KPI của mình |
 | | **KPI toàn kho** | Điểm tổng hợp & xếp loại cho cả kho, bảng *Tiêu chí – Chỉ số – Tiêu chuẩn*, so sánh với quý trước (cải thiện / xấu đi), biểu đồ xu hướng, **phương án cải tiến**; tải CSV |
+| | **Phân tích ABC & kệ** | Xếp nhóm **A / B / C** theo giá trị xuất (80% / 95%), biểu đồ Pareto, so vị trí kệ hiện tại với gợi ý (nhóm A ở dãy A sát cửa xuất) |
 | | **Báo cáo** | Biểu đồ: giá trị tồn theo danh mục, trạng thái, nhập / xuất / hủy **theo tháng hoặc theo quý**, top hàng xuất nhiều, tồn theo nhóm bảo quản, hàng hủy theo quý |
 | | **Quản lý rủi ro** | Danh sách rủi ro (hết hàng, dưới dự trữ, cận hạn, quá hạn, tồn đọng), **ma trận rủi ro** khả năng × ảnh hưởng, biện pháp xử lý; tải CSV |
 | Hệ thống | **Tài khoản** | Đổi mật khẩu; quản trị viên quản lý tài khoản |
@@ -173,6 +174,8 @@ Mô phỏng từ **01/01/2026 đến 12/11/2026 (4 quý)**:
 | `shelf_life_days` | Hạn sử dụng (ngày, tính từ ngày nhập). ≥ 90 ngày: *Để lâu được*; ngắn hơn: *Mau hỏng* |
 | `storage_zone` | Khu bảo quản (Kho mát 2–6 °C / Kho khô, thoáng mát / Kho đông lạnh) |
 | `storage_note` | Điều kiện bảo quản (giá trị tham khảo) |
+| `lead_time_days` | Thời gian chờ nhà cung cấp giao (ngày), dùng tính ROP |
+| `shelf_location` | Vị trí kệ, ví dụ `A-01` (dãy A gần cửa xuất, `M-` là kho mát) |
 | `note` | Ghi chú |
 
 **`transactions.csv`**
@@ -186,6 +189,8 @@ Mô phỏng từ **01/01/2026 đến 12/11/2026 (4 quý)**:
 | `unit_price` | Đơn giá của giao dịch |
 | `note` | Ghi chú |
 | `created_by` | Tên tài khoản người lập phiếu |
+| `order_id` | Mã phiếu: các dòng cùng một phiếu chung mã |
+| `started_at`, `finished_at` | Giờ mở phiếu và giờ bấm ghi nhận (đo thời gian xử lý) |
 
 `type` còn có `adj_plus` / `adj_minus` = điều chỉnh sau kiểm kê (thực tế thừa / thiếu so với sổ).
 
@@ -219,20 +224,29 @@ bộ chỉ số cho tất cả danh mục.
 | Tiêu chí | Chỉ số | Công thức | Tiêu chuẩn (Đạt · Cảnh báo) | Trọng số |
 |----------|--------|-----------|-----------------------------|----------|
 | Bảo đảm dự trữ | Tỷ lệ ngày còn hàng | (ngày × mặt hàng) tồn > 0 ÷ tổng | ≥ 98% · ≥ 95% | 15% |
-| | Tỷ lệ đạt mức dự trữ | (ngày × mặt hàng) tồn > mức tối thiểu ÷ tổng | ≥ 90% · ≥ 80% | 15% |
+| | Tỷ lệ đạt mức dự trữ | (ngày × mặt hàng) tồn > mức tối thiểu ÷ tổng | ≥ 90% · ≥ 80% | 10% |
 | | Số lần hết hàng | số lần chuyển từ còn hàng sang hết hàng | ≤ 2 · ≤ 5 | 10% |
-| Chất lượng bảo quản | Tỷ lệ hao hụt do hết hạn | giá trị hủy ÷ giá trị nhập | ≤ 1% · ≤ 3% | 15% |
+| Chất lượng bảo quản | Tỷ lệ hao hụt do hết hạn | giá trị hủy ÷ giá trị nhập | ≤ 1% · ≤ 3% | 10% |
 | | Tỷ lệ hàng cận hạn cuối quý | giá trị lô cận hạn ÷ giá trị tồn | ≤ 5% · ≤ 10% | 5% |
 | Hiệu suất sử dụng vốn | Vòng quay tồn kho (quy năm) | giá trị xuất ÷ tồn bình quân × 365 ÷ số ngày | ≥ 24 · ≥ 15 | 10% |
 | | Tỷ lệ hàng tồn đọng | giá trị hàng cần > 60 ngày mới bán hết ÷ giá trị tồn | ≤ 10% · ≤ 20% | 5% |
 | Tuân thủ quy trình | Tỷ lệ nhập hàng kịp thời | lần chạm mức dự trữ có phiếu nhập trong ≤ 2 ngày ÷ tổng | ≥ 90% · ≥ 75% | 10% |
 | Chính xác sổ sách | Độ chính xác tồn kho (kiểm kê) | số lần kiểm kê khớp sổ (lệch ≤ 0,5%) ÷ tổng số lần kiểm kê | ≥ 95% · ≥ 85% | 15% |
+| Năng suất xử lý | Thời gian xử lý / dòng hàng | tổng thời gian các phiếu (mở → ghi nhận) ÷ tổng số dòng hàng | ≤ 2,5 · ≤ 3,5 phút | 10% |
 
 **3. Dữ liệu:** phiếu nhập / xuất / hủy, phiếu kiểm kê và danh mục sản phẩm (đơn giá, mức dự trữ, hạn dùng).
 
 > Tiêu chuẩn và trọng số là giá trị giả định để minh họa; chỉnh trong `KPI_DEFS` ở `src/kpi.py`.
 
 **Điểm tổng hợp** = Σ trọng số × hệ số (Đạt 100% · Cảnh báo 60% · Chưa đạt 20%).
+Chỉ số không có dữ liệu trong quý (ví dụ phiếu chưa ghi giờ) hiện *Chưa đo* và không tính vào điểm.
+
+### Điểm đặt hàng (ROP) và tồn kho an toàn
+
+- **d**, **σ**: lượng xuất bình quân và độ lệch chuẩn mỗi ngày (30 ngày gần nhất); **L**: thời gian chờ giao.
+- **Tồn kho an toàn** SS = z × σ × √L, với z = 1,65 (mức phục vụ 95%).
+- **ROP** = d × L + SS. Tồn ≤ ROP → *Sắp hết* (cần đặt hàng). Chưa có lịch sử bán thì dùng mức tồn tối thiểu.
+- **Số lượng gợi ý đặt** = ROP + d × 7 − tồn kho.
 **Xếp loại:** A ≥ 85 (Tốt) · B ≥ 70 (Khá) · C ≥ 50 (Trung bình) · D < 50 (Cần cải thiện).
 Đổi tiêu chuẩn / trọng số / biện pháp cải tiến → sửa `KPI_DEFS` và `ACTIONS` trong [`src/kpi.py`](src/kpi.py).
 

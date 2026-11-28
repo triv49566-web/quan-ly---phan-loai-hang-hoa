@@ -60,15 +60,15 @@ def register(products: pd.DataFrame, tx: pd.DataFrame, date: pd.Timestamp | None
                          value=(qty if qty is not None else 0) * r["price"]))
 
     for _, r in stock.iterrows():
-        qty, mn, unit = float(r["quantity"]), float(r["min_stock"]), r["unit"]
+        qty, mn, unit = float(r["quantity"]), float(r["rop"]), r["unit"]
         days = r["days_cover"]
         days = None if days is None or (isinstance(days, float) and math.isnan(days)) else float(days)
         if qty <= 0:
-            add(r, "out", 5, f"Tồn 0 {unit}, mức dự trữ {mn:g} {unit}")
+            add(r, "out", 5, f"Tồn 0 {unit}, điểm đặt hàng {mn:g} {unit}")
         elif qty <= mn:
             likelihood = 5 if days is not None and days <= 2 else 4 if days is not None and days <= 5 else 3
             cover = f", đủ bán ~{days:.0f} ngày" if days is not None else ""
-            add(r, "low", likelihood, f"Còn {qty:g} {unit} ≤ mức dự trữ {mn:g} {unit}{cover}", qty)
+            add(r, "low", likelihood, f"Còn {qty:g} {unit} ≤ điểm đặt hàng (ROP) {mn:g} {unit}{cover}", qty)
         if days is not None and days > 60:
             add(r, "slow", 4 if days > 120 else 3, f"Còn {qty:g} {unit}, cần ~{days:.0f} ngày mới bán hết", qty)
         elif days is None and qty > 0:

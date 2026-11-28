@@ -22,14 +22,15 @@ from .catalog import TX_DISPOSE, TX_IN, TX_OUT
 
 OBJECT = "Quy trình quản lý kho nhu yếu phẩm"
 
-GOOD, WARN, BAD = "Đạt", "Cảnh báo", "Chưa đạt"
+GOOD, WARN, BAD, NA = "Đạt", "Cảnh báo", "Chưa đạt", "Chưa đo"
 STATUS_POINTS = {GOOD: 1.0, WARN: 0.6, BAD: 0.2}   # tỷ lệ điểm nhận được theo trọng số
+# "Chưa đo": chỉ số không có dữ liệu trong kỳ → không tính vào điểm (chia lại theo trọng số còn lại)
 
 SLOW_DAYS = 60          # tồn > 60 ngày bán mới hết  → hàng tồn đọng
 RESTOCK_WITHIN = 2      # chạm mức dự trữ phải có phiếu nhập trong ≤ 2 ngày
 
 CRITERIA = ["Bảo đảm dự trữ", "Chất lượng bảo quản", "Hiệu suất sử dụng vốn", "Tuân thủ quy trình",
-            "Chính xác sổ sách"]
+            "Chính xác sổ sách", "Năng suất xử lý"]
 COUNT_TOLERANCE = 0.005   # lệch ≤ 0,5% tồn sổ sách vẫn tính là khớp (sai số cân / đong)
 
 KPI_DEFS = {
@@ -40,7 +41,7 @@ KPI_DEFS = {
         data="Tồn cuối mỗi ngày, tính từ phiếu nhập / xuất / hủy"),
     "reserve": dict(
         group="Bảo đảm dự trữ", label="Tỷ lệ đạt mức dự trữ", unit="%", fmt="pct",
-        higher=True, target=90, warn=80, weight=15,
+        higher=True, target=90, warn=80, weight=10,
         formula="Số (ngày × mặt hàng) có tồn > mức tối thiểu ÷ tổng số (ngày × mặt hàng) × 100",
         data="Tồn cuối mỗi ngày, mức tồn tối thiểu của từng sản phẩm"),
     "stockouts": dict(
@@ -50,7 +51,7 @@ KPI_DEFS = {
         data="Tồn cuối mỗi ngày"),
     "expiry_loss": dict(
         group="Chất lượng bảo quản", label="Tỷ lệ hao hụt do hết hạn", unit="%", fmt="pct",
-        higher=False, target=1, warn=3, weight=15,
+        higher=False, target=1, warn=3, weight=10,
         formula="Giá trị hàng hủy ÷ giá trị hàng nhập trong quý × 100",
         data="Phiếu hủy hàng, phiếu nhập kho"),
     "near_expiry": dict(
@@ -79,6 +80,12 @@ KPI_DEFS = {
         formula="Số lần kiểm kê có tồn thực tế khớp sổ sách (lệch ≤ 0,5%) ÷ tổng số lần kiểm kê × 100 "
                 "(không kiểm kê lần nào trong quý = 0%)",
         data="Phiếu kiểm kê: tồn trên sổ và tồn đếm thực tế"),
+    "minutes_per_line": dict(
+        group="Năng suất xử lý", label="Thời gian xử lý / dòng hàng", unit="phút", fmt="num",
+        higher=False, target=2.5, warn=3.5, weight=10, optional=True,
+        formula="Tổng thời gian xử lý các phiếu (từ lúc mở phiếu đến lúc ghi nhận) ÷ tổng số dòng hàng "
+                "trong các phiếu đó",
+        data="Giờ mở phiếu và giờ ghi nhận của phiếu nhập / xuất / hủy"),
 }
 
 GRADES = [(85, "A", "Tốt"), (70, "B", "Khá"), (50, "C", "Trung bình"), (0, "D", "Cần cải thiện")]
@@ -90,7 +97,7 @@ GRADES = [(85, "A", "Tốt"), (70, "B", "Khá"), (50, "C", "Trung bình"), (0, "
 def evaluate(key: str, value: float) -> str:
     d = KPI_DEFS[key]
     if value is None or (isinstance(value, float) and np.isnan(value)):
-        return BAD
+        return NA if d.get("optional") else BAD
     if d["higher"]:
         return GOOD if value >= d["target"] else WARN if value >= d["warn"] else BAD
     return GOOD if value <= d["target"] else WARN if value <= d["warn"] else BAD
@@ -213,13 +220,29 @@ def compute(products: pd.DataFrame, tx: pd.DataFrame, start: pd.Timestamp,
                 timely += 1
     r["timely_restock"] = timely / total * 100 if total else 100.0
     r["accuracy"], r["counts_ok"], r["counts"] = accuracy_of(stocktakes, start, end, products["id"])
+    r["minutes_per_line"], r["timed_lines"] = minutes_per_line(period_tx)
     return r
 
 
+def minutes_per_line(tx: pd.DataFrame) -> tuple[float, int]:
+    """(phút / dòng hàng, số dòng có ghi giờ) của các phiếu nhập / xuất / hủy."""
+    if "finished_at" not in tx or tx.empty:
+        return float("nan"), 0
+    t = tx[tx["type"].isin([TX_IN, TX_OUT, TX_DISPOSE]) & tx["finished_at"].notna() & tx["started_at"].notna()
+           & (tx["order_id"].fillna("") != "")]
+    if t.empty:
+        return float("nan"), 0
+    t = t.assign(s=pd.to_datetime(t["started_at"]), f=pd.to_datetime(t["finished_at"]))
+    g = t.groupby("order_id").agg(s=("s", "min"), f=("f", "max"), n=("id", "count"))
+    minutes = ((g["f"] - g["s"]).dt.total_seconds() / 60).clip(lower=0).sum()
+    return float(minutes / g["n"].sum()), int(g["n"].sum())
+
+
 def score_of(values: dict) -> float:
-    total_w = sum(d["weight"] for d in KPI_DEFS.values())
-    pts = sum(d["weight"] * STATUS_POINTS[evaluate(k, values[k])] for k, d in KPI_DEFS.items())
-    return pts / total_w * 100
+    st = {k: evaluate(k, values[k]) for k in KPI_DEFS}
+    total_w = sum(d["weight"] for k, d in KPI_DEFS.items() if st[k] != NA)
+    pts = sum(d["weight"] * STATUS_POINTS[st[k]] for k, d in KPI_DEFS.items() if st[k] != NA)
+    return pts / total_w * 100 if total_w else 0.0
 
 
 def quarterly_table(products: pd.DataFrame, tx: pd.DataFrame,
@@ -253,6 +276,8 @@ ACTIONS = {
     "slow_moving": "Tạm ngừng nhập hàng tồn đọng, bán giảm giá hoặc chuyển kênh bán; xem lại nhu cầu thực tế.",
     "timely_restock": "Giao trách nhiệm kiểm tra tồn kho cuối ngày cho một người; phiếu nhập phải lập trong "
                       f"≤ {RESTOCK_WITHIN} ngày kể từ khi chạm mức dự trữ.",
+    "minutes_per_line": "Gom yêu cầu xuất theo đợt 10h / 15h, lấy hàng theo thứ tự kệ; đưa hàng nhóm A "
+                        "ra kệ gần cửa xuất; dùng phiếu nhiều dòng thay vì ghi từng mặt hàng.",
     "accuracy": "Kiểm kê định kỳ cuối mỗi tháng và đối chiếu ngay khi lệch; ghi đủ phiếu xuất / hủy, "
                 "không lấy hàng khi chưa lập phiếu; khóa kho khi không có người phụ trách.",
 }
@@ -284,6 +309,11 @@ def drivers(key: str, products: pd.DataFrame, tx: pd.DataFrame, start: pd.Timest
         per_day = last30.groupby("product_id")["quantity"].sum().reindex(daily.columns).fillna(0) / 30
         cover = (stock_end / per_day.replace(0, np.nan)).fillna(np.inf).where(stock_end > 0, 0)
         s = cover[cover > (SLOW_DAYS if key == "slow_moving" else 15)]
+    elif key == "minutes_per_line":
+        tt = t[t["finished_at"].notna() & t["started_at"].notna() & (t["order_id"].fillna("") != "")]
+        if tt.empty:
+            return []
+        s = tt.groupby("product_id").size()
     elif key == "accuracy":
         if stocktakes is None or stocktakes.empty:
             return []
@@ -304,6 +334,8 @@ def improvement_plan(products: pd.DataFrame, tx: pd.DataFrame, row: pd.Series,
     plans = []
     for key, d in KPI_DEFS.items():
         status = evaluate(key, row[key])
+        if status == NA:
+            continue
         worse = False
         if prev is not None:
             delta = row[key] - prev[key]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import secrets
 import sqlite3
 
 import pandas as pd
@@ -39,6 +40,8 @@ CREATE TABLE IF NOT EXISTS products (
     shelf_life_days INTEGER NOT NULL DEFAULT 365,  -- hạn sử dụng tính từ ngày nhập
     storage_zone TEXT DEFAULT '',             -- khu bảo quản (trống = tự chọn theo hạn dùng)
     storage_note TEXT DEFAULT '',             -- điều kiện bảo quản
+    lead_time_days INTEGER NOT NULL DEFAULT 2, -- thời gian chờ nhà cung cấp giao (ngày)
+    shelf_location TEXT DEFAULT '',           -- vị trí kệ, ví dụ K-A2
     note        TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS transactions (
@@ -49,7 +52,31 @@ CREATE TABLE IF NOT EXISTS transactions (
     quantity    REAL NOT NULL CHECK (quantity > 0),
     unit_price  REAL NOT NULL DEFAULT 0,
     note        TEXT DEFAULT '',
-    created_by  TEXT DEFAULT ''                -- tên tài khoản người lập phiếu
+    created_by  TEXT DEFAULT '',               -- tên tài khoản người lập phiếu
+    order_id    TEXT DEFAULT '',               -- mã phiếu (các dòng cùng phiếu chung mã)
+    started_at  TEXT,                          -- lúc mở phiếu
+    finished_at TEXT                           -- lúc bấm ghi nhận
+);
+CREATE TABLE IF NOT EXISTS out_requests (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   TEXT NOT NULL,
+    product_id   INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    quantity     REAL NOT NULL CHECK (quantity > 0),
+    issued_qty   REAL,
+    urgent       INTEGER NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'waiting',   -- waiting / picking / done / cancelled
+    pick_list_id INTEGER REFERENCES pick_lists(id),
+    requested_by TEXT DEFAULT '',
+    note         TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS pick_lists (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    kind        TEXT NOT NULL,                     -- Đợt 10h / Đợt 15h / Gấp
+    created_by  TEXT DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'open',      -- open / done
+    finished_at TEXT,
+    finished_by TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS stocktakes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,6 +127,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
             added = True
     if added:
         _fill_storage_from_csv(conn)
+    new_ops = [c for c in ("lead_time_days", "shelf_location") if c not in cols]
+    for col in new_ops:
+        ddl = "INTEGER NOT NULL DEFAULT 2" if col == "lead_time_days" else "TEXT DEFAULT ''"
+        conn.execute(f"ALTER TABLE products ADD COLUMN {col} {ddl}")
+    if new_ops:
+        _fill_ops_from_csv(conn)
     cat_cols = {r["name"] for r in conn.execute("PRAGMA table_info(categories)")}
     if "manager_id" not in cat_cols:
         conn.execute("ALTER TABLE categories ADD COLUMN manager_id INTEGER "
@@ -122,6 +155,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 SELECT id, date, product_id, type, quantity, unit_price, note FROM transactions_old;
             DROP TABLE transactions_old;
         """)
+    tx_cols = {r["name"] for r in conn.execute("PRAGMA table_info(transactions)")}
+    for col in ("order_id", "started_at", "finished_at"):
+        if col not in tx_cols:
+            conn.execute(f"ALTER TABLE transactions ADD COLUMN {col} TEXT" + (" DEFAULT ''" if col == "order_id" else ""))
 
 
 def _fill_storage_from_csv(conn: sqlite3.Connection) -> None:
@@ -136,6 +173,18 @@ def _fill_storage_from_csv(conn: sqlite3.Connection) -> None:
     conn.executemany(
         "UPDATE products SET storage_zone = ?, storage_note = ? WHERE name = ? AND storage_note = ''",
         [(r.storage_zone, r.storage_note, r.name) for r in df.itertuples(index=False)])
+
+
+def _fill_ops_from_csv(conn: sqlite3.Connection) -> None:
+    """File dữ liệu cũ: lấy thời gian chờ giao và vị trí kệ mẫu theo tên sản phẩm."""
+    prod_csv = os.path.join(RAW_DIR, "products.csv")
+    if not os.path.exists(prod_csv):
+        return
+    df = pd.read_csv(prod_csv, encoding="utf-8-sig")
+    if "shelf_location" not in df.columns:
+        return
+    conn.executemany("UPDATE products SET lead_time_days = ?, shelf_location = ? WHERE name = ?",
+                     [(int(r.lead_time_days), r.shelf_location, r.name) for r in df.itertuples(index=False)])
 
 
 def _seed_from_csv(conn: sqlite3.Connection) -> None:
@@ -153,17 +202,21 @@ def _seed_from_csv(conn: sqlite3.Connection) -> None:
         shelf = int(getattr(p, "shelf_life_days", 365))
         conn.execute(
             "INSERT INTO products(name, category_id, unit, price, min_stock, shelf_life_days,"
-            " storage_zone, storage_note, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " storage_zone, storage_note, note, lead_time_days, shelf_location)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (p.name, cat_ids[p.category], p.unit, float(p.price), float(p.min_stock), shelf,
-             getattr(p, "storage_zone", ""), getattr(p, "storage_note", ""), p.note))
+             getattr(p, "storage_zone", ""), getattr(p, "storage_note", ""), p.note,
+             int(getattr(p, "lead_time_days", 2)), getattr(p, "shelf_location", "")))
     if os.path.exists(tx_csv):
         prod_ids = {r["name"]: r["id"] for r in conn.execute("SELECT id, name FROM products")}
-        tx = pd.read_csv(tx_csv, encoding="utf-8-sig").fillna({"note": "", "created_by": ""})
+        tx = pd.read_csv(tx_csv, encoding="utf-8-sig").fillna({"note": "", "created_by": "", "order_id": ""})
+        tx = tx.astype(object).where(tx.notna(), None)
         conn.executemany(
-            "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note, created_by)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note, created_by,"
+            " order_id, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(t.date, prod_ids[t.product], t.type, float(t.quantity), float(t.unit_price), t.note,
-              getattr(t, "created_by", "")) for t in tx.itertuples(index=False)])
+              getattr(t, "created_by", ""), getattr(t, "order_id", ""), getattr(t, "started_at", None),
+              getattr(t, "finished_at", None)) for t in tx.itertuples(index=False)])
         st_csv = os.path.join(RAW_DIR, "stocktakes.csv")
         if os.path.exists(st_csv):
             stc = pd.read_csv(st_csv, encoding="utf-8-sig").fillna({"note": "", "created_by": ""})
@@ -208,14 +261,16 @@ def assign_from_config(conn: sqlite3.Connection, mapping) -> None:
 def products_df(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(
         "SELECT p.id, p.name, p.category_id, c.name AS category, p.unit, p.price, "
-        "p.min_stock, p.shelf_life_days, p.storage_zone, p.storage_note, p.note, c.manager_id FROM products p "
+        "p.min_stock, p.shelf_life_days, p.storage_zone, p.storage_note, p.note, p.lead_time_days, "
+        "p.shelf_location, c.manager_id FROM products p "
         "LEFT JOIN categories c ON c.id = p.category_id ORDER BY c.name, p.name", conn)
 
 
 def transactions_df(conn: sqlite3.Connection) -> pd.DataFrame:
     df = pd.read_sql_query(
         "SELECT t.id, t.date, t.product_id, p.name AS product, c.name AS category, "
-        "p.unit, t.type, t.quantity, t.unit_price, t.note, t.created_by FROM transactions t "
+        "p.unit, t.type, t.quantity, t.unit_price, t.note, t.created_by, t.order_id, t.started_at, "
+        "t.finished_at FROM transactions t "
         "JOIN products p ON p.id = t.product_id "
         "LEFT JOIN categories c ON c.id = p.category_id "
         "ORDER BY t.date DESC, t.id DESC", conn)
@@ -233,6 +288,12 @@ def current_stock(conn: sqlite3.Connection, product_id: int) -> float:
 # ---------------------------------------------------------------------------
 # Ghi dữ liệu (ném ValueError kèm thông báo tiếng Việt khi dữ liệu sai)
 # ---------------------------------------------------------------------------
+def _check_lead(days: float) -> int:
+    if days is None or days < 0 or days > 90:
+        raise ValueError("Thời gian chờ giao phải từ 0 đến 90 ngày.")
+    return int(days)
+
+
 def _check_shelf(shelf_life_days: float) -> int:
     if not shelf_life_days or shelf_life_days < 1:
         raise ValueError("Hạn sử dụng phải từ 1 ngày trở lên.")
@@ -268,7 +329,8 @@ def delete_category(conn: sqlite3.Connection, category_id: int) -> None:
 def add_product(conn: sqlite3.Connection, name: str, category_id: int | None, unit: str,
                 price: float, min_stock: float, note: str = "",
                 opening_qty: float = 0, date: dt.date | None = None,
-                shelf_life_days: int = 365, storage_zone: str = "", storage_note: str = "") -> int:
+                shelf_life_days: int = 365, storage_zone: str = "", storage_note: str = "",
+                lead_time_days: int = 2, shelf_location: str = "") -> int:
     """Thêm sản phẩm; nếu opening_qty > 0 thì ghi luôn một phiếu nhập tồn đầu."""
     _check_product(name, unit, price, min_stock)
     shelf = _check_shelf(shelf_life_days)
@@ -278,9 +340,11 @@ def add_product(conn: sqlite3.Connection, name: str, category_id: int | None, un
         with conn:
             cur = conn.execute(
                 "INSERT INTO products(name, category_id, unit, price, min_stock, shelf_life_days,"
-                " storage_zone, storage_note, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " storage_zone, storage_note, note, lead_time_days, shelf_location)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (name.strip(), category_id, unit, price, min_stock, shelf, storage_zone or "",
-                 (storage_note or "").strip(), note.strip()))
+                 (storage_note or "").strip(), note.strip(), _check_lead(lead_time_days),
+                 (shelf_location or "").strip().upper()))
             pid = cur.lastrowid
             if opening_qty > 0:
                 conn.execute(
@@ -295,16 +359,19 @@ def add_product(conn: sqlite3.Connection, name: str, category_id: int | None, un
 def update_product(conn: sqlite3.Connection, product_id: int, name: str,
                    category_id: int | None, unit: str, price: float,
                    min_stock: float, note: str = "", shelf_life_days: int = 365,
-                   storage_zone: str = "", storage_note: str = "") -> None:
+                   storage_zone: str = "", storage_note: str = "",
+                   lead_time_days: int = 2, shelf_location: str = "") -> None:
     _check_product(name, unit, price, min_stock)
     shelf = _check_shelf(shelf_life_days)
     try:
         with conn:
             conn.execute(
                 "UPDATE products SET name=?, category_id=?, unit=?, price=?, min_stock=?,"
-                " shelf_life_days=?, storage_zone=?, storage_note=?, note=? WHERE id=?",
+                " shelf_life_days=?, storage_zone=?, storage_note=?, note=?, lead_time_days=?,"
+                " shelf_location=? WHERE id=?",
                 (name.strip(), category_id, unit, price, min_stock, shelf, storage_zone or "",
-                 (storage_note or "").strip(), note.strip(), product_id))
+                 (storage_note or "").strip(), note.strip(), _check_lead(lead_time_days),
+                 (shelf_location or "").strip().upper(), product_id))
     except sqlite3.IntegrityError:
         raise ValueError(f"Sản phẩm “{name}” đã tồn tại.") from None
 
@@ -372,3 +439,139 @@ def add_transaction(conn: sqlite3.Connection, product_id: int, tx_type: str,
             " VALUES (?, ?, ?, ?, ?, ?, ?)",
             ((date or dt.date.today()).isoformat(), product_id, tx_type,
              quantity, unit_price, note.strip(), created_by))
+
+
+# ---------------------------------------------------------------------------
+# Phiếu nhiều dòng, yêu cầu xuất, danh sách lấy hàng
+# ---------------------------------------------------------------------------
+ORDER_PREFIX = {TX_IN: "PN", TX_OUT: "PX", TX_DISPOSE: "PH"}
+
+
+def now_str() -> str:
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def _new_order_id(prefix: str) -> str:
+    return f"{prefix}-{dt.datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+
+
+def add_order(conn: sqlite3.Connection, tx_type: str, lines: list[dict], date: dt.date | None = None,
+              started_at: str | None = None, finished_at: str | None = None,
+              created_by: str = "", order_id: str | None = None) -> str:
+    """Ghi một phiếu nhiều dòng hàng (cùng mã phiếu, cùng giờ mở / giờ ghi).
+
+    lines: [{"product_id", "quantity", "unit_price", "note"}]. Kiểm tra toàn bộ trước khi ghi:
+    một dòng sai thì không ghi dòng nào.
+    """
+    if tx_type not in (TX_IN, TX_OUT, TX_DISPOSE):
+        raise ValueError("Loại phiếu không hợp lệ.")
+    lines = [l for l in lines if l.get("product_id") is not None and (l.get("quantity") or 0) > 0]
+    if not lines:
+        raise ValueError("Phiếu chưa có dòng hàng nào có số lượng > 0.")
+    names = dict(conn.execute("SELECT id, name FROM products").fetchall())
+    if tx_type in (TX_OUT, TX_DISPOSE):
+        need = {}
+        for l in lines:
+            need[l["product_id"]] = need.get(l["product_id"], 0) + float(l["quantity"])
+        for pid, q in need.items():
+            stock = current_stock(conn, pid)
+            if q > stock + 1e-9:
+                raise ValueError(f"Không đủ hàng: {names.get(pid, pid)} chỉ còn {catalog.fmt_qty(stock)}, "
+                                 f"phiếu cần {catalog.fmt_qty(q)}.")
+    for l in lines:
+        if (l.get("unit_price") or 0) < 0:
+            raise ValueError("Đơn giá phải ≥ 0.")
+    oid = order_id or _new_order_id(ORDER_PREFIX[tx_type])
+    d = (date or dt.date.today()).isoformat()
+    fin = finished_at or now_str()
+    with conn:
+        conn.executemany(
+            "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note, created_by,"
+            " order_id, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(d, int(l["product_id"]), tx_type, float(l["quantity"]), float(l.get("unit_price") or 0),
+              (l.get("note") or "").strip(), created_by, oid, started_at or fin, fin) for l in lines])
+    return oid
+
+
+def add_requests(conn: sqlite3.Connection, lines: list[dict], urgent: bool = False,
+                 requested_by: str = "") -> int:
+    """Gửi yêu cầu xuất vào hàng chờ. Trả về số dòng đã gửi."""
+    lines = [l for l in lines if l.get("product_id") is not None and (l.get("quantity") or 0) > 0]
+    if not lines:
+        raise ValueError("Yêu cầu chưa có dòng hàng nào có số lượng > 0.")
+    t = now_str()
+    with conn:
+        conn.executemany(
+            "INSERT INTO out_requests(created_at, product_id, quantity, urgent, status, requested_by, note)"
+            " VALUES (?, ?, ?, ?, 'waiting', ?, ?)",
+            [(t, int(l["product_id"]), float(l["quantity"]), int(bool(urgent)), requested_by,
+              (l.get("note") or "").strip()) for l in lines])
+    return len(lines)
+
+
+def requests_df(conn: sqlite3.Connection) -> pd.DataFrame:
+    df = pd.read_sql_query(
+        "SELECT r.id, r.created_at, r.product_id, p.name AS product, p.unit, p.price, p.shelf_location, "
+        "c.name AS category, c.manager_id, r.quantity, r.issued_qty, r.urgent, r.status, r.pick_list_id, "
+        "r.requested_by, r.note FROM out_requests r JOIN products p ON p.id = r.product_id "
+        "LEFT JOIN categories c ON c.id = p.category_id ORDER BY r.urgent DESC, r.created_at, r.id", conn)
+    df["created_at"] = pd.to_datetime(df["created_at"])
+    return df
+
+
+def cancel_request(conn: sqlite3.Connection, request_id: int) -> None:
+    with conn:
+        conn.execute("UPDATE out_requests SET status = 'cancelled' WHERE id = ? AND status = 'waiting'",
+                     (request_id,))
+
+
+def create_pick_list(conn: sqlite3.Connection, request_ids: list[int], kind: str,
+                     created_by: str = "") -> int:
+    """Gom các yêu cầu đang chờ thành một danh sách lấy hàng (đợt 10h / 15h hoặc gấp)."""
+    ids = [int(i) for i in request_ids]
+    if not ids:
+        raise ValueError("Không có yêu cầu nào đang chờ để gom.")
+    with conn:
+        cur = conn.execute("INSERT INTO pick_lists(created_at, kind, created_by, status) VALUES (?, ?, ?, 'open')",
+                           (now_str(), kind, created_by))
+        pl = cur.lastrowid
+        conn.execute(f"UPDATE out_requests SET status = 'picking', pick_list_id = ? "
+                     f"WHERE status = 'waiting' AND id IN ({','.join('?' * len(ids))})", (pl, *ids))
+    return pl
+
+
+def pick_lists_df(conn: sqlite3.Connection) -> pd.DataFrame:
+    return pd.read_sql_query("SELECT * FROM pick_lists ORDER BY id DESC", conn)
+
+
+def complete_pick_list(conn: sqlite3.Connection, pick_list_id: int, created_by: str = "") -> dict:
+    """Xác nhận đã lấy xong: tạo phiếu xuất (một mã phiếu), xuất tối đa số đang có trong kho."""
+    pl = conn.execute("SELECT * FROM pick_lists WHERE id = ?", (pick_list_id,)).fetchone()
+    if pl is None or pl["status"] != "open":
+        raise ValueError("Danh sách lấy hàng không còn mở.")
+    reqs = conn.execute("SELECT r.id, r.product_id, r.quantity, p.price FROM out_requests r "
+                        "JOIN products p ON p.id = r.product_id WHERE r.pick_list_id = ? AND r.status = 'picking'",
+                        (pick_list_id,)).fetchall()
+    left = {}
+    lines, short = [], 0
+    for r in reqs:
+        pid = r["product_id"]
+        if pid not in left:
+            left[pid] = current_stock(conn, pid)
+        give = round(min(r["quantity"], max(left[pid], 0)), 3)
+        left[pid] -= give
+        short += r["quantity"] - give > 1e-9
+        lines.append((r, give))
+    fin = now_str()
+    oid = f"PL-{pick_list_id}"
+    with conn:
+        conn.executemany(
+            "INSERT INTO transactions(date, product_id, type, quantity, unit_price, note, created_by,"
+            " order_id, started_at, finished_at) VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?)",
+            [(fin[:10], r["product_id"], give, r["price"], f"Yêu cầu #{r['id']}", created_by, oid,
+              pl["created_at"], fin) for r, give in lines if give > 0])
+        conn.executemany("UPDATE out_requests SET status = 'done', issued_qty = ? WHERE id = ?",
+                         [(give, r["id"]) for r, give in lines])
+        conn.execute("UPDATE pick_lists SET status = 'done', finished_at = ?, finished_by = ? WHERE id = ?",
+                     (fin, created_by, pick_list_id))
+    return {"lines": sum(1 for _, g in lines if g > 0), "short": int(short), "order_id": oid}

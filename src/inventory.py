@@ -15,6 +15,23 @@ import pandas as pd
 from .catalog import POSITIVE_TYPES, TX_IN, TX_OUT, UNCATEGORIZED, evaluate_stock
 
 WINDOW_DAYS = 30  # số ngày dùng để tính mức tiêu thụ bình quân
+SERVICE_Z = 1.65  # hệ số an toàn ứng với mức phục vụ 95%
+REVIEW_DAYS = 7   # đặt thêm đủ bán 7 ngày sau khi về tới điểm đặt hàng
+COUNT_UNITS = {"gói", "chai", "hộp", "lon", "túi", "quả", "cái"}
+
+
+def reorder_point(daily_mean: float, daily_std: float, lead_days: float, min_stock: float) -> tuple[float, float]:
+    """(tồn kho an toàn SS, điểm đặt hàng ROP).
+
+    SS  = z × σ × √L
+    ROP = d × L + SS
+    d, σ: lượng xuất bình quân và độ lệch chuẩn mỗi ngày (30 ngày gần nhất); L: thời gian chờ giao.
+    Chưa có lịch sử bán (d = 0) thì dùng mức tồn tối thiểu cũ.
+    """
+    if daily_mean <= 0:
+        return 0.0, float(min_stock)
+    ss = SERVICE_Z * daily_std * np.sqrt(max(lead_days, 0))
+    return ss, daily_mean * lead_days + ss
 
 
 def stock_table(products: pd.DataFrame, tx: pd.DataFrame,
@@ -24,13 +41,18 @@ def stock_table(products: pd.DataFrame, tx: pd.DataFrame,
     quantity      tồn kho hiện tại
     value         giá trị tồn = tồn kho × đơn giá
     out_window    lượng xuất trong `window_days` ngày gần nhất
+    daily_mean    d: xuất bình quân / ngày;  daily_std  σ: độ lệch chuẩn / ngày
+    safety_stock  tồn kho an toàn SS = z·σ·√L
+    rop           điểm đặt hàng ROP = d·L + SS
+    order_qty     gợi ý số lượng đặt = ROP + d × 7 − tồn (khi tồn ≤ ROP)
     days_cover    số ngày còn đủ dùng = tồn kho / tiêu thụ bình quân ngày
-    status        Đủ hàng / Sắp hết / Hết hàng
+    status        Đủ hàng / Sắp hết (≤ ROP) / Hết hàng
     """
     df = products.copy()
     if tx.empty:
         qty = pd.Series(dtype=float)
         out_w = pd.Series(dtype=float)
+        mean = std = pd.Series(dtype=float)
     else:
         qty = signed(tx).groupby(tx["product_id"]).sum()
         # Mốc tính = ngày giao dịch gần nhất (ổn định cả khi dùng dữ liệu mẫu cũ)
@@ -38,13 +60,45 @@ def stock_table(products: pd.DataFrame, tx: pd.DataFrame,
         recent = tx[(tx["type"] == TX_OUT) &
                     (tx["date"] > as_of - pd.Timedelta(days=window_days))]
         out_w = recent.groupby("product_id")["quantity"].sum()
+        days = pd.date_range(as_of.normalize() - pd.Timedelta(days=window_days - 1), as_of.normalize())
+        per_day = (recent.assign(d=recent["date"].dt.normalize())
+                   .pivot_table(index="d", columns="product_id", values="quantity", aggfunc="sum")
+                   .reindex(days, fill_value=0).fillna(0))
+        mean, std = per_day.mean(), per_day.std(ddof=0)
 
     df["quantity"] = df["id"].map(qty).fillna(0.0).round(3)
     df["value"] = df["quantity"] * df["price"]
     df["out_window"] = df["id"].map(out_w).fillna(0.0).round(3)
     avg_daily = (df["out_window"] / window_days).replace(0, np.nan)
     df["days_cover"] = (df["quantity"] / avg_daily).round(0)
-    df["status"] = [evaluate_stock(q, m) for q, m in zip(df["quantity"], df["min_stock"])]
+    df["daily_mean"] = df["id"].map(mean).fillna(0.0)
+    df["daily_std"] = df["id"].map(std).fillna(0.0)
+    lead = df["lead_time_days"] if "lead_time_days" in df else pd.Series(2, index=df.index)
+    ss_rop = [reorder_point(d, s, l, m) for d, s, l, m in
+              zip(df["daily_mean"], df["daily_std"], lead, df["min_stock"])]
+    df["safety_stock"] = [round(x[0], 1) for x in ss_rop]
+    df["rop"] = [round(x[1], 1) for x in ss_rop]
+    want = df["rop"] + df["daily_mean"] * REVIEW_DAYS - df["quantity"]
+    whole = df["unit"].isin(COUNT_UNITS) | (df["unit"] == "g")
+    df["order_qty"] = np.where(df["quantity"] <= df["rop"],
+                               np.where(whole, np.ceil(want), np.ceil(want * 10) / 10), 0).clip(min=0)
+    df["status"] = [evaluate_stock(q, r) for q, r in zip(df["quantity"], df["rop"])]
+    return df
+
+
+def abc_table(stock: pd.DataFrame, tx: pd.DataFrame, a_cut: float = 80, b_cut: float = 95) -> pd.DataFrame:
+    """Phân tích ABC theo giá trị xuất: A = nhóm chiếm 80% giá trị đầu tiên, B đến 95%, C còn lại."""
+    out = tx[tx["type"] == TX_OUT]
+    val = (out["quantity"] * out["unit_price"]).groupby(out["product_id"]).sum()
+    lines = out.groupby("product_id").size()
+    df = stock.assign(out_value=stock["id"].map(val).fillna(0.0),
+                      out_lines=stock["id"].map(lines).fillna(0).astype(int))
+    df = df.sort_values("out_value", ascending=False).reset_index(drop=True)
+    total = df["out_value"].sum() or 1
+    df["share"] = df["out_value"] / total * 100
+    df["cum_share"] = df["share"].cumsum()
+    prev = df["cum_share"] - df["share"]
+    df["abc"] = np.where(prev < a_cut, "A", np.where(prev < b_cut, "B", "C"))
     return df
 
 

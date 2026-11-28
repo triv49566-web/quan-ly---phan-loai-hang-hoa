@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 RNG = np.random.default_rng(42)  # cố định seed để tái lập được
+RNG_TIME = np.random.default_rng(7)  # riêng cho giờ phiếu: thêm giờ không làm đổi số liệu nhập / xuất
 
 START = dt.date(2026, 1, 1)
 END = dt.date(2026, 11, 12)
@@ -91,6 +92,24 @@ STORAGE = {
     "Đậu xanh": (ZONE_DRY, "Túi kín, khô ráo, chống mọt"),
 }
 
+# Thời gian chờ nhà cung cấp giao (ngày) và vị trí kệ.
+# Dãy A gần cửa xuất nhất, càng về E càng xa. Xếp theo danh mục (chưa tối ưu) để trang ABC có gợi ý.
+LEAD_TIME = {"Sữa tươi không đường": 1, "Sữa chua": 1, "Trứng gà": 1, "Sữa đặc có đường": 3,
+             "Nước suối 500ml": 2, "Gạo ST25": 3, "Gạo nếp": 3, "Mì gói": 3, "Bún khô": 4,
+             "Muối i-ốt": 5, "Tiêu đen xay": 5, "Bột ngọt": 5, "Đường cát trắng": 4, "Nước mắm": 4,
+             "Nước tương": 4, "Dầu ăn đậu nành": 4, "Dầu mè": 5, "Đậu xanh": 5}
+SHELF = {"Muối i-ốt": "A-01", "Tiêu đen xay": "A-02", "Bột ngọt": "A-03", "Đường cát trắng": "A-04",
+         "Nước mắm": "A-05", "Nước tương": "A-06", "Dầu mè": "B-01", "Dầu ăn đậu nành": "B-02",
+         "Đậu xanh": "B-03", "Sữa đặc có đường": "C-01", "Nước suối 500ml": "C-02", "Bún khô": "D-01",
+         "Mì gói": "D-02", "Gạo nếp": "D-03", "Gạo ST25": "D-04",
+         "Sữa tươi không đường": "M-01", "Sữa chua": "M-02", "Trứng gà": "M-03"}
+# Thời gian xử lý bình quân một dòng hàng (phút) theo quý: mỗi người nhanh dần theo nhịp riêng
+MINUTES_PER_LINE = {
+    "nhan vien 1": [3.2, 2.8, 2.4, 2.1],
+    "nhan vien 2": [2.6, 2.3, 2.1, 1.9],
+    "nhan vien 3": [4.2, 3.8, 3.4, 3.1],
+}
+
 # Người quản lý phụ trách từng danh mục (tên tài khoản)
 MANAGERS = {
     "nhan vien 1": ["Sữa & đồ uống", "Thực phẩm tươi"],
@@ -136,9 +155,10 @@ def daily_out(unit: str, mean: float) -> float:
 
 def build() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     products = pd.DataFrame(
-        [(n, c, u, p, m, s, STORAGE[n][0], STORAGE[n][1], "") for n, c, u, p, m, _, _, s in PRODUCTS],
+        [(n, c, u, p, m, s, STORAGE[n][0], STORAGE[n][1], "", LEAD_TIME[n], SHELF[n])
+         for n, c, u, p, m, _, _, s in PRODUCTS],
         columns=["name", "category", "unit", "price", "min_stock", "shelf_life_days",
-                 "storage_zone", "storage_note", "note"],
+                 "storage_zone", "storage_note", "note", "lead_time_days", "shelf_location"],
     )
 
     tx = []
@@ -213,9 +233,34 @@ def build() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     tx_df["_o"] = tx_df["type"].map(order)
     tx_df = tx_df.sort_values(["date", "_o", "product"], kind="stable").drop(columns="_o")
     tx_df["date"] = pd.to_datetime(tx_df["date"]).dt.strftime("%Y-%m-%d")
+    tx_df = add_order_times(tx_df)
     st_df = pd.DataFrame(counts, columns=["date", "product", "book_qty", "counted_qty", "note", "created_by"])
     st_df["date"] = pd.to_datetime(st_df["date"]).dt.strftime("%Y-%m-%d")
     return products, tx_df, st_df.sort_values(["date", "product"])
+
+
+def add_order_times(tx: pd.DataFrame) -> pd.DataFrame:
+    """Gán mã phiếu, giờ mở và giờ ghi nhận cho từng phiếu.
+
+    Nhập: 08:00 · Hủy: 08:30 · Xuất: gom theo đợt 10:00 hoặc 15:00 · Kiểm kê: không ghi giờ.
+    """
+    tx = tx.copy()
+    hour = {"in": "08", "dispose": "08"}
+    prefix = {"in": "PN", "dispose": "PH", "out": "PL", "adj_plus": "KK", "adj_minus": "KK"}
+    batch = np.where(RNG_TIME.random(len(tx)) < 0.6, "10", "15")
+    tx["_h"] = [hour.get(t, b) for t, b in zip(tx["type"], batch)]
+    tx["order_id"] = [f"{prefix[t]}-{d}-{h}-{u.split()[-1]}" if t in prefix else ""
+                      for t, d, h, u in zip(tx["type"], tx["date"], tx["_h"], tx["created_by"])]
+    tx["started_at"], tx["finished_at"] = None, None
+    for oid, g in tx[tx["type"].isin(["in", "out", "dispose"])].groupby("order_id"):
+        d = dt.date.fromisoformat(g["date"].iloc[0])
+        who, q = g["created_by"].iloc[0], (d.month - 1) // 3
+        minute0 = 30 if g["type"].iloc[0] == "dispose" else 0
+        start = dt.datetime.combine(d, dt.time(int(g["_h"].iloc[0]), minute0)) +             dt.timedelta(minutes=float(RNG_TIME.uniform(0, 20)))
+        minutes = sum(MINUTES_PER_LINE[who][q] * RNG_TIME.lognormal(0, 0.25) for _ in range(len(g)))
+        tx.loc[g.index, "started_at"] = start.isoformat(timespec="seconds")
+        tx.loc[g.index, "finished_at"] = (start + dt.timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    return tx.drop(columns="_h")
 
 
 def main() -> None:
